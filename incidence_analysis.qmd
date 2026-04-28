@@ -1,0 +1,1764 @@
+---
+title: "Incidence Analysis of Human Non-typhoidal Salmonella, Malaysia, 2018–2024"
+author: "Hazlienor Mohd Hatta"
+subtitle: "R script for DrPH Thesis: Incidence, Serovar Dynamics and Forecasting of Human Non-typhoidal Salmonella Disease in Malaysia"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Introduction
+
+This Quarto document contains the R workflow for the incidence analysis conducted for the DrPH thesis titled **"Incidence, Serovar Dynamics and Forecasting of Human Non-typhoidal Salmonella Disease in Malaysia"** by **Hazlienor Mohd Hatta**.
+
+The analysis estimates the frequency of reported laboratory-confirmed human non-typhoidal *Salmonella* (NTS) infection in Malaysia from 2018 to 2024. The workflow includes data import, cleaning and harmonisation of case and population datasets, calculation of crude and standardised incidence rates, and regression modelling to assess temporal, demographic and geographical variation. Incidence rates are expressed per 100,000 population.
+
+> **Note:** This script is intended for reproducible analysis. No individual-level identifiable patient information should be shared in the public repository. Output-saving commands, such as `ggsave()`, have been removed from this version.
+
+# Analysis workflow
+
+The incidence analysis follows these steps:
+
+1.  Load required R packages and import NTS case and population datasets.
+2.  Clean and harmonise demographic and geographical variables.
+3.  Aggregate case counts and merge them with population denominators.
+4.  Calculate crude incidence rates with 95% confidence intervals.
+5.  Calculate age-standardised and age-sex-standardised incidence rates using direct standardisation.
+6.  Fit Poisson and negative binomial regression models to assess incidence rate ratios (IRRs).
+7.  Evaluate temporal, demographic and geographical variation in incidence.
+8.  Visualise incidence trends and subgroup variation.
+
+# Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+# Core data manipulation and Plot standardised incidence trends.ting
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(ggPlot standardised incidence trends.2)
+library(ggthemes)
+
+# Regression modelling and diagnostics
+library(MASS)
+library(AER)
+library(performance)
+library(pscl)
+library(broom)
+
+# Model summaries and tables
+library(ggeffects)
+library(sjPlot)
+library(gtsummary)
+library(epitools)
+```
+
+# 1. Data preparation
+
+## 1.1 Import NTS case data
+
+```{r import-nts-data}
+library(readxl)
+NTS <- read_excel("NTS_inc.xlsx")
+```
+
+```{r}
+NTS_inc <- NTS %>%
+  select(Year, State, Age_categ, Sex)
+```
+
+```{r}
+NTS_inc <- NTS_inc %>%
+  mutate(
+    State = factor(State),
+    Sex = factor(Sex),
+    Age_categ = factor(Age_categ)
+  )
+
+NTS_inc$Year <- as.integer(NTS_inc$Year)
+summary(NTS_inc)
+```
+
+```{r}
+cases <- NTS_inc %>%
+  group_by(Year, State, Age_categ, Sex) %>%
+  summarise(cases = n(), .groups = "drop")
+summary(cases)
+```
+
+## 1.2 Import and prepare population data
+
+```{r import-population-data}
+pop <- read_excel("pop.xlsx")
+str(pop)
+```
+
+```{r}
+pop <- pop %>%
+  mutate(
+    State = case_when(
+      State %in% c("W.P. Kuala Lumpur",
+                   "W.P. Labuan",
+                   "W.P. Putrajaya") ~ "Wilayah Persekutuan",
+      TRUE ~ State
+    )
+  )
+```
+
+```{r}
+pop <- pop %>%
+  group_by(Year, State, Age_categ, Sex) %>%
+  summarise(population = sum(population), .groups = "drop")
+
+pop <- pop %>%
+  mutate(
+    State = factor(State),
+    Sex = factor(Sex),
+    Age_categ = factor(Age_categ)
+  )
+
+unique(pop$State)
+```
+
+```{r}
+unique(cases$State)
+```
+
+```{r}
+pop$Year <- as.integer(pop$Year)
+```
+
+## 1.3 Merge case and population data
+
+```{r merge-case-population}
+inc <-left_join(cases, pop,
+          by = c("Year", "State","Age_categ","Sex"))
+```
+
+Exclude records with unknown age or sex for regression analysis.
+
+```{r}
+inc_reg <- inc %>%
+  filter(
+    Sex != "Unknown",
+    Age_categ != "Unknown"
+  )
+```
+
+convert population(/1000) to real \## 1.2 Import and prepare population data
+
+```{r import-population-data}
+inc_reg <- inc_reg %>%
+  mutate(pop_real = population * 1000)
+```
+
+```{r}
+pop <- pop %>%
+  mutate(pop_real = population * 1000)
+```
+
+Replace missing case counts with zero after merging with population data.
+
+```{r}
+inc_reg$cases[is.na(inc_reg$cases)] <- 0
+```
+
+# 2. Regression analysis
+
+## 2.1 Incidence rate ratio analysis
+
+### 2.1.1 Annual crude reporting rate
+
+```{r}
+year_cases <- inc_reg %>%
+  group_by(Year) %>%
+  summarise(cases = sum(cases, na.rm = TRUE), .groups = "drop")
+
+year_pop <- pop %>%
+  group_by(Year) %>%
+  summarise(population = sum(pop_real), .groups = "drop")
+
+year_rate <- year_cases %>%
+  left_join(year_pop, by = "Year") %>%
+  mutate(rate = (cases / population) * 100000)
+
+```
+
+Centre year to support interpretation of the temporal trend.
+
+```{r}
+year_rate$Year_c <- year_rate$Year - min(year_rate$Year)
+```
+
+### 2.1.2 Poisson regression
+
+Model annual case counts using the population denominator as an offset.
+
+```{r}
+poisson_model <- glm(
+  cases ~ Year_c + offset(log(population)),
+  family = poisson,
+  data = year_rate
+)
+```
+
+```{r}
+dispersion <- sum(residuals(poisson_model, type = "pearson")^2) /
+              poisson_model$df.residual
+
+dispersion
+```
+
+\A dispersion ratio greater than 2 suggests strong overdispersion.
+
+```{r}
+dispersiontest(poisson_model)
+```
+
+A statistically significant dispersion test indicates overdispersion.
+
+### 2.1.3 Negative binomial regression
+
+```{r}
+nb_model <- glm.nb(
+  cases ~ Year_c + offset(log(population)),
+  data = year_rate
+)
+nb_model
+```
+
+Compare Poisson and negative binomial models using AIC.
+
+```{r}
+AIC(poisson_model, nb_model)
+```
+
+Estimate predicted annual rates from the selected model.
+
+```{r}
+year_rate$pred_cases <- predict(nb_model, type = "response")
+
+year_rate$pred_rate <- (year_rate$pred_cases / year_rate$population) * 100000
+```
+
+Calculate 95% confidence intervals for predicted annual rates.
+
+```{r}
+pred <- predict(nb_model, se.fit = TRUE)
+
+year_rate$fit <- exp(pred$fit)
+year_rate$lcl <- exp(pred$fit - 1.96 * pred$se.fit)
+year_rate$ucl <- exp(pred$fit + 1.96 * pred$se.fit)
+
+year_rate$pred_rate <- (year_rate$fit / year_rate$population) * 100000
+year_rate$lcl_rate <- (year_rate$lcl / year_rate$population) * 100000
+year_rate$ucl_rate <- (year_rate$ucl / year_rate$population) * 100000
+```
+
+Plot observed and model-predicted annual reporting rates.
+
+```{r}
+ggPlot standardised incidence trends.(year_rate, aes(x = Year)) +
+
+  # Calculate 95% confidence intervals for predicted annual rates. ribbon
+  geom_ribbon(aes(ymin = lcl_rate, ymax = ucl_rate),
+              fill = "grey80", alpha = 0.6) +
+
+  # predicted trend
+  geom_line(aes(y = pred_rate),
+            colour = "black",
+            linewidth = 1.2) +
+
+  # crude observed points
+  geom_point(aes(y = rate),
+             colour = "#d73027",
+             size = 3) +
+
+  # show every year
+  scale_x_continuous(
+    breaks = seq(min(year_rate$Year), max(year_rate$Year), by = 1)
+  ) +
+
+  labs(
+    x = "Year",
+    y = "Reporting rate per 100,000 population"
+  ) +
+
+  theme_classic(base_size = 14) +
+
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 10),
+    panel.grid = element_blank(),
+    Plot standardised incidence trends..title = element_text(hjust = 0.5, face = "bold")
+  )
+```
+
+## 2.2 Multivariable incidence rate ratio analysis
+
+Collapse detailed age categories into broader epidemiological age groups.
+
+```{r}
+inc_reg3 <- inc_reg %>%
+  mutate(Age_group = case_when(
+    Age_categ %in% c("0-4","5-9") ~ "Children (0-9)",
+    Age_categ %in% c("10-14","15-19") ~ "Adolescents (10-19)",
+    Age_categ %in% c("20-24","25-29","30-34","35-39",
+                     "40-44","45-49","50-54","55-59") ~ "Adults (20-59)",
+    Age_categ %in% c("60-64","65-69","70-74","75-79",
+                     "80-84","85+") ~ "Elderly (≥60)"
+  ))
+```
+
+Drop unused factor levels after excluding unknown values.
+
+```{r}
+inc_reg3$Sex <- droplevels(inc_reg3$Sex)
+```
+
+```{r}
+inc_reg3<- inc_reg3 %>%
+  group_by(Year, State, Sex, Age_group) %>%
+  summarise(
+    cases = sum(cases),
+    pop_real = sum(pop_real),
+    .groups = "drop"
+  )
+```
+
+Set reference categories for regression models.
+
+Selangor was used as the reference Add state to assess geographical variation..
+
+```{r}
+inc_reg3$State <- relevel(inc_reg3$State, ref = "Selangor")
+levels(inc_reg3$State)
+```
+
+Inspect sex categories before model fitting.
+
+```{r}
+levels(inc_reg3$Sex)
+```
+
+Adults aged 20–59 years were used as the reference age group.
+
+```{r}
+inc_reg3$Age_group <- factor(inc_reg3$Age_group)
+inc_reg3$Age_group <- relevel(inc_reg3$Age_group, ref = "Adults (20-59)")
+levels(inc_reg3$Age_group)
+```
+
+Fit the initial Poisson regression model.
+
+```{r}
+model_allp <- glm(
+  cases ~ Year + Sex + Age_group + State + offset(log(pop_real)),
+  family = poisson,
+  data = inc_reg3
+)
+```
+
+Assess overdispersion in the Poisson model.
+
+```{r}
+check_overdispersion(model_allp)
+```
+
+```{r}
+dispersiontest(model_allp)
+```
+
+\`
+
+```{r}
+pR2(model_allp)
+```
+
+### 2.2.1 Temporal model
+
+```{r}
+model_temp <- glm.nb(
+  cases ~ Year + offset(log(pop_real)),
+  data = inc_reg3
+)
+summary(model_temp)
+```
+
+### 2.2.2 Demographic model
+
+Model age and sex while adjusting for year.
+
+```{r}
+model_demo<- glm.nb(
+  cases ~ Year + Sex + Age_group +  offset(log(pop_real)),
+  data = inc_reg3
+)
+summary(model_demo)
+```
+
+### 2.2.3 Spatial model
+
+Add state to assess geographical variation.
+
+```{r}
+model_spatial<- glm.nb(
+  cases ~ Year + Sex + Age_group + State +  offset(log(pop_real)),
+  data = inc_reg3
+)
+summary(model_spatial)
+```
+
+Fit a null model for comparison.
+
+```{r}
+model_null <- update(model_spatial, . ~ 1)
+```
+
+### 2.2.4 Model comparison
+
+```{r}
+anova(model_null, model_temp,model_demo, model_spatial, test="LRT")
+```
+
+```{r}
+AIC(model_null, model_temp,model_demo, model_spatial)
+```
+
+Assess selected interaction terms.
+
+```{r}
+int1 <- glm.nb(
+  cases ~ Year + Sex + Age_group + State + Sex:Age_group + offset(log(pop_real)),
+  data = inc_reg3
+)
+
+summary(int1)
+```
+
+```{r}
+int2 <- glm.nb(
+  cases ~ Year + Sex + Age_group + State + Year:Age_group + offset(log(pop_real)),
+  data = inc_reg3
+)
+
+summary(int2)
+```
+
+```{r}
+int3 <- glm.nb(
+  cases ~ Year + Sex + Age_group + State + Year:State + offset(log(pop_real)),
+  data = inc_reg3
+)
+
+summary(int3)
+```
+
+```{r}
+anova(model_spatial, int1,int2,int3, test = "LRT")
+```
+
+### 2.2.5 Final Assess model diagnostics. and summaries
+
+Calculate pseudo R-squared for the final model.
+
+```{r}
+pR2(model_spatial)
+```
+
+Assess potential outlying observations.
+
+```{r}
+check_outliers(model_spatial)
+```
+
+Assess influential observations.
+
+```{r}
+influence.measures(model_spatial)
+```
+
+Assess model diagnostics.
+
+```{r}
+check_model(model_spatial)
+```
+
+Generate univariable negative binomial regression summaries.
+
+```{r}
+model_crude_sex <- glm.nb(cases ~ Sex + offset(log(pop_real)), data = inc_reg3)
+model_crude_age <- glm.nb(cases ~ Age_group + offset(log(pop_real)), data = inc_reg3)
+model_crude_Add state to assess geographical variation. <- glm.nb(cases ~ State + offset(log(pop_real)), data = inc_reg3)
+model_crude_year <- glm.nb(cases ~ Year + offset(log(pop_real)), data = inc_reg3)
+
+tbl_sex <- tbl_regression(
+  model_crude_sex,
+  exponentiate = TRUE,
+  estimate_fun = ~style_number(.x, digits = 2),
+  pvalue_fun = ~style_pvalue(.x, digits = 3)
+)
+
+tbl_age <- tbl_regression(
+  model_crude_age,
+  exponentiate = TRUE,
+  estimate_fun = ~style_number(.x, digits = 2),
+  pvalue_fun = ~style_pvalue(.x, digits = 3)
+)
+
+tbl_Add state to assess geographical variation. <- tbl_regression(
+  model_crude_Add state to assess geographical variation.,
+  exponentiate = TRUE,
+  estimate_fun = ~style_number(.x, digits = 2),
+  pvalue_fun = ~style_pvalue(.x, digits = 3)
+)
+
+tbl_year <- tbl_regression(
+  model_crude_year,
+  exponentiate = TRUE,
+  estimate_fun = ~style_number(.x, digits = 2),
+  pvalue_fun = ~style_pvalue(.x, digits = 3)
+)
+
+tbl_all <- tbl_merge(
+  tbls = list(tbl_sex, tbl_age, tbl_Add state to assess geographical variation., tbl_year),
+  tab_spanner = c("Sex", "Age", "State", "Year")
+)
+```
+
+```{r}
+tbl_all
+```
+
+Visualise adjusted incidence rate ratios.
+
+```{r}
+Plot standardised incidence trends._model(
+  model_spatial,
+  type = "est",
+  transform = "exp",   # converts coefficients to IRR
+  show.values = TRUE,
+  value.offset = .3
+)
+```
+
+```{r}
+irr_df <- tidy(model_spatial, exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(term != "(Intercept)")
+
+ggPlot standardised incidence trends.(irr_df, aes(x = estimate, y = reorder(term, estimate))) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+  labs(
+    x = "Incidence Rate Ratio (IRR)",
+    y = "",
+    title = "Adjusted Incidence Rate Ratios from Negative Binomial Model"
+  ) +
+  theme_minimal()
+```
+
+table
+
+```{r}
+tbl_regression(
+ model_spatial,
+ exponentiate = TRUE,
+  estimate_fun = ~style_number(.x, digits = 1),
+  pvalue_fun = ~style_pvalue(.x, digits = 3))
+```
+
+# 3. Incidence estimation
+
+Estimate crude and standardised incidence rates of reported laboratory-confirmed NTS per 100,000 population.
+
+## 3.1 Define standard population
+
+```{r}
+std_pop <- data.frame(
+  Age_categ = c(
+    "0-4","5-9","10-14","15-19",
+    "20-24","25-29","30-34","35-39",
+    "40-44","45-49","50-54","55-59",
+    "60-64","65-69","70-74","75-79",
+    "80-84","85+"
+  ),
+  `2018` = c(2595200,2560600,2549900,2871900,3232400,3281700,2868700,2438600,
+             1951000,1769100,1619700,1417900,1130400,843000,571900,337800,196000,145700),
+  `2019` = c(2580200,2545300,2527100,2857700,3181200,3270700,2870000,2512800,
+             1970700,1774300,1627300,1444900,1171300,870200,612800,346800,210200,150200),
+  `2020` = c(2519600,2641300,2611300,2839700,2866900,2891600,2907100,2742600,
+             2194600,1843600,1585900,1459700,1152200,917400,611300,329500,194900,138500),
+  `2021` = c(2445700,2639500,2600000,2800700,2892900,2851600,2865600,2777900,
+             2267200,1870200,1605700,1460800,1208500,951400,644900,353400,201300,139300),
+  `2022` = c(2374300,2592700,2613000,2781900,2912800,2835000,2850000,2777100,
+             2359200,1894000,1638400,1452100,1254300,974800,674700,377000,203100,134600),
+  `2023` = c(2366600,2584300,2618400,2774300,3041900,2925200,2889400,2844300,
+             2477800,1955500,1675800,1472100,1290700,1014800,712800,413100,205000,139500),
+  `2024` = c(2355600,2574900,2620700,2724600,3156800,3036400,2956100,2856900,
+             2608000,2018400,1723100,1472900,1339600,1051500,750300,446300,215300,145800)
+)
+```
+
+```{r}
+names(std_pop) <- gsub("X", "", names(std_pop))
+```
+
+```{r}
+std_pop_long <- std_pop %>%
+  pivot_longer(
+    cols = -Age_categ,
+    names_to = "Year",
+    values_to = "std_pop"
+  )
+```
+
+```{r}
+std_pop_long$Year <- as.numeric(std_pop_long$Year)
+```
+
+```{r}
+std_pop_long$Age_categ <- factor(
+  std_pop_long$Age_categ,
+  levels = c(
+    "0-4","5-9","10-14","15-19",
+    "20-24","25-29","30-34","35-39",
+    "40-44","45-49","50-54","55-59",
+    "60-64","65-69","70-74","75-79",
+    "80-84","85+"
+  )
+)
+```
+
+```{r}
+std_pop_long <- std_pop_long %>%
+  arrange(Year, Age_categ)
+```
+
+## 3.2 Incidence by sex
+
+Calculate age-standardised incidence by sex using annual age-specific population denominators.
+
+```{r}
+NTS_inc1<- NTS_inc%>%
+  filter(
+    Sex != "Unknown",
+    Age_categ != "Unknown"
+  )
+```
+
+```{r}
+cases_sex <- NTS_inc1 %>%
+  group_by(Year, Age_categ, Sex) %>%
+  summarise(cases = n(), .groups = "drop")
+```
+
+```{r}
+pop_sex <- pop %>%
+  group_by(Year, Age_categ, Sex) %>%
+  summarise(population = sum(population), .groups = "drop")
+```
+
+```{r}
+inc_sex<-left_join(cases_sex, pop_sex,
+          by = c("Year","Age_categ","Sex"))
+```
+
+```{r}
+inc_sex$Age_categ <- factor(
+  inc_sex$Age_categ,
+  levels = c(
+    "0-4","5-9","10-14","15-19",
+    "20-24","25-29","30-34","35-39",
+    "40-44","45-49","50-54","55-59",
+    "60-64","65-69","70-74","75-79",
+    "80-84","85+"
+  )
+)
+```
+
+```{r}
+inc_sex <- inc_sex %>%
+  arrange(Year, Sex, Age_categ)
+```
+
+```{r}
+inc_sex <- inc_sex  %>%
+  mutate(pop_real = population * 1000)
+```
+
+```{r}
+inc_sex_p <-left_join(inc_sex, std_pop_long, by = c("Year", "Age_categ"))
+inc_sex_p <-inc_sex_p %>%
+  mutate(age_rate = cases / pop_real)
+```
+
+```{r}
+std_weights <- std_pop_long %>%
+  group_by(Year) %>%
+  mutate(weight = std_pop / sum(std_pop)) %>%
+  select(Year, Age_categ, weight)
+
+```
+
+```{r}
+inc_weighted <- inc_sex_p %>%
+  left_join(std_weights, by = c("Year", "Age_categ"))
+```
+
+```{r}
+age_adj_sex <- inc_weighted %>%
+  mutate(age_rate = cases / pop_real) %>%
+  mutate(weighted_rate = age_rate * weight) %>%
+  group_by(Year, Sex) %>%
+  summarise(
+    adj_rate = sum(weighted_rate) * 100000,
+    .groups = "drop"
+  )
+```
+
+```{r}
+age_adj_sex_ci <- inc_weighted %>%
+  
+  # age-specific rate
+  mutate(age_rate = cases / pop_real) %>%
+  
+  # weighted rate
+  mutate(weighted_rate = age_rate * weight) %>%
+  
+  # variance component (Dobson method)
+  mutate(var_component = (weight^2) * (cases / (pop_real^2))) %>%
+  
+  group_by(Year, Sex) %>%
+  summarise(
+    adj_rate = sum(weighted_rate),
+    variance = sum(var_component),
+    se = sqrt(variance),
+    lower_ci = (adj_rate - 1.96 * se) * 100000,
+    upper_ci = (adj_rate + 1.96 * se) * 100000,
+    adj_rate = adj_rate * 100000,
+    .groups = "drop"
+  )
+```
+
+```{r}
+age_adj_sex_ci <- age_adj_sex_ci %>%
+  mutate(
+    adj_rate = round(adj_rate,2),
+    lower_ci = round(lower_ci,2),
+    upper_ci = round(upper_ci,2)
+  )
+```
+
+Calculate crude incidence by sex using absolute population denominators.
+
+```{r}
+crude_sex <- inc_sex %>%
+  group_by(Year, Sex) %>%
+  summarise(
+    cases = sum(cases),
+    population = sum(pop_real),
+    rate = (cases / population) * 100000,
+    .groups = "drop"
+  )
+
+crude_sex <- inc_sex %>%
+  group_by(Year, Sex) %>%
+  summarise(
+    cases = sum(cases),
+    population = sum(pop_real),
+    rate = (cases / population) * 100000,
+    .groups = "drop"
+  )
+
+crude_sex <- crude_sex %>%
+  mutate(
+    se = sqrt(cases) / population
+  )
+
+crude_sex <- crude_sex %>%
+  mutate(
+    lower_ci = (rate/100000 - 1.96 * se) * 100000,
+    upper_ci = (rate/100000 + 1.96 * se) * 100000
+  )
+crude_sex
+```
+
+Use 2020 cencus population as standard \## 1.2 Import and prepare population data
+
+```{r import-population-data}
+std_2020 <- std_pop_long %>%
+  filter(Year == 2020) %>%
+  select(Age_categ, std_pop)
+
+std_weights1 <- std_2020 %>%
+  mutate(weight = std_pop / sum(std_pop)) %>%
+  select(Age_categ, weight)
+
+inc_weighted_2020 <- inc_sex %>%
+  left_join(std_weights1, by = "Age_categ")
+
+age_adj_sex_2020 <- inc_weighted_2020 %>%
+  mutate(age_rate = cases / pop_real) %>%
+  mutate(weighted_rate = age_rate * weight) %>%
+  group_by(Year, Sex) %>%
+  summarise(
+    adj_rate = sum(weighted_rate) * 100000,
+    .groups = "drop"
+  )
+
+age_adj_sex_ci_2020 <- inc_weighted_2020 %>%
+  mutate(age_rate = cases / pop_real) %>%
+  mutate(weighted_rate = age_rate * weight) %>%
+  mutate(var_component = (weight^2) * (cases / (pop_real^2))) %>%
+  group_by(Year, Sex) %>%
+  summarise(
+    adj_rate = sum(weighted_rate),
+    variance = sum(var_component),
+    se = sqrt(variance),
+    lower_ci = (adj_rate - 1.96 * se) * 100000,
+    upper_ci = (adj_rate + 1.96 * se) * 100000,
+    adj_rate = adj_rate * 100000,
+    .groups = "drop"
+  )
+
+age_adj_sex_ci_2020
+```
+
+Calculate overall crude and age-standardised incidence by sex for 2018–2024.
+
+Calculate crude incidence using cumulative person-years across the study period.
+
+```{r}
+overall_crude_sex <- inc_sex %>%
+  group_by(Sex) %>%
+  summarise(
+    cases = sum(cases),
+    population = sum(pop_real),
+    crude_ir = cases / population * 100000,
+    .groups = "drop"
+  )
+
+overall_crude_sex <- overall_crude_sex %>%
+  mutate(
+    se = sqrt(cases) / population,
+    lower_ci = (crude_ir/100000 - 1.96 * se) * 100000,
+    upper_ci = (crude_ir/100000 + 1.96 * se) * 100000
+  )
+
+overall_crude_sex <- overall_crude_sex %>%
+  mutate(
+    crude_ir = round(crude_ir,2),
+    lower_ci = round(lower_ci,2),
+    upper_ci = round(upper_ci,2)
+  )
+```
+
+Calculate overall age-standardised incidence using the 2020 standard population.
+
+```{r}
+overall_sex <- inc_sex %>%
+  group_by(Sex, Age_categ) %>%
+  summarise(
+    cases = sum(cases),
+    pop = sum(pop_real),
+    .groups = "drop"
+  )
+
+overall_sex <- overall_sex %>%
+  left_join(std_weights1, by = "Age_categ")
+
+overall_adj_sex <- overall_sex %>%
+  mutate(
+    age_rate = cases / pop,
+    weighted_rate = age_rate * weight
+  ) %>%
+  group_by(Sex) %>%
+  summarise(
+    adj_rate = sum(weighted_rate) * 100000,
+    .groups = "drop"
+  )
+
+overall_adj_sex_ci <- overall_sex %>%
+  mutate(
+    age_rate = cases / pop,
+    weighted_rate = age_rate * weight,
+    var_component = (weight^2) * (cases / (pop^2))
+  ) %>%
+  group_by(Sex) %>%
+  summarise(
+    adj_rate = sum(weighted_rate),
+    variance = sum(var_component),
+    se = sqrt(variance),
+    lower_ci = (adj_rate - 1.96 * se) * 100000,
+    upper_ci = (adj_rate + 1.96 * se) * 100000,
+    adj_rate = adj_rate * 100000,
+    .groups = "drop"
+  )
+
+```
+
+Plot standardised incidence trends. sex with Calculate 95% confidence intervals for predicted annual rates. ribbon
+
+```{r}
+ggPlot standardised incidence trends.(age_adj_sex_ci_2020,
+       aes(x = Year, y = adj_rate, color = Sex, fill = Sex, group = Sex)) +
+
+  geom_ribbon(
+    aes(ymin = lower_ci, ymax = upper_ci),
+    alpha = 0.25,
+    color = NA
+  ) +
+
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+
+  scale_x_continuous(
+    breaks = unique(age_adj_sex_ci_2020$Year)
+  ) +
+
+  scale_y_continuous(
+    breaks = seq(5, 20, by = 5),
+    limits = c(0, 20)
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "Male" = "#1f77b4",
+      "Female" = "#e377c2"
+    )
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "Male" = "#1f77b4",
+      "Female" = "#e377c2"
+    )
+  ) +
+
+  labs(
+    y = "Age-standardised incidence rate (per 100,000)",
+    color = "Sex",
+    fill = "Sex"
+  ) +
+
+  theme_classic(base_size = 12) +
+
+  theme(
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    legend.position = "right"
+  )
+```
+
+#### by Add state to assess geographical variation.
+
+Prepare case and population data for incidence estimation.
+
+```{r}
+NTS_inc1 <- NTS_inc1 %>%
+  filter(Age_categ != "Unknown")
+NTS_inc1$Age_categ <- droplevels(NTS_inc1$Age_categ)
+```
+
+```{r}
+cases_Add state to assess geographical variation. <- NTS_inc1 %>%
+  count(Year, State, Age_categ, name = "cases") %>%
+  complete(Year, State, Age_categ, fill = list(cases = 0))
+```
+
+```{r}
+pop_Add state to assess geographical variation. <- pop %>%
+  group_by(Year, State, Age_categ) %>%
+  summarise(population = sum(population), .groups = "drop")
+```
+
+```{r}
+inc_Add state to assess geographical variation.<-left_join(cases_Add state to assess geographical variation., pop_Add state to assess geographical variation.,
+          by = c("Year","State","Age_categ"))
+```
+
+```{r}
+inc_Add state to assess geographical variation.$Age_categ <- factor(
+  inc_Add state to assess geographical variation.$Age_categ,
+  levels = c(
+    "0-4","5-9","10-14","15-19",
+    "20-24","25-29","30-34","35-39",
+    "40-44","45-49","50-54","55-59",
+    "60-64","65-69","70-74","75-79",
+    "80-84","85+"
+  )
+)
+```
+
+```{r}
+inc_Add state to assess geographical variation. <- inc_Add state to assess geographical variation. %>%
+  arrange(Year, State, Age_categ)
+```
+
+```{r}
+inc_Add state to assess geographical variation. <- inc_Add state to assess geographical variation.  %>%
+  mutate(pop_real = population * 1000)
+inc_Add state to assess geographical variation.
+```
+
+Calculate standardised incidence using the census standard population.
+
+```{r}
+inc_weighted_Add state to assess geographical variation._2020 <- inc_Add state to assess geographical variation. %>%
+  left_join(std_weights1, by = "Age_categ")
+
+age_adj_Add state to assess geographical variation._2020 <- inc_weighted_Add state to assess geographical variation._2020 %>%
+  mutate(age_rate = cases / pop_real) %>%
+  mutate(weighted_rate = age_rate * weight) %>%
+  group_by(Year, State) %>%
+  summarise(
+    adj_rate = sum(weighted_rate) * 100000,
+    .groups = "drop"
+  )
+
+age_adj_Add state to assess geographical variation._ci_2020 <- inc_weighted_Add state to assess geographical variation._2020 %>%
+  mutate(age_rate = cases / pop_real) %>%
+  mutate(weighted_rate = age_rate * weight) %>%
+  mutate(var_component = (weight^2) * (cases / (pop_real^2))) %>%
+  group_by(Year, State) %>%
+  summarise(
+    adj_rate = sum(weighted_rate),
+    variance = sum(var_component),
+    se = sqrt(variance),
+    lower_ci = (adj_rate - 1.96 * se) * 100000,
+    upper_ci = (adj_rate + 1.96 * se) * 100000,
+    adj_rate = adj_rate * 100000,
+    .groups = "drop"
+  )
+
+age_adj_Add state to assess geographical variation._ci_2020
+```
+
+crude by Add state to assess geographical variation. (real population)
+
+```{r}
+crude_Add state to assess geographical variation. <- inc_Add state to assess geographical variation. %>%
+  group_by(Year, State) %>%
+  summarise(
+    cases = sum(cases),
+    population = sum(pop_real),
+    rate = (cases / population) * 100000,
+    .groups = "drop"
+  )
+
+crude_Add state to assess geographical variation. <- crude_Add state to assess geographical variation. %>%
+  mutate(
+    se = sqrt(cases) / population
+  )
+
+crude_Add state to assess geographical variation. <- crude_Add state to assess geographical variation. %>%
+  mutate(
+    lower_ci = (rate/100000 - 1.96 * se) * 100000,
+    upper_ci = (rate/100000 + 1.96 * se) * 100000
+  )
+crude_Add state to assess geographical variation.
+```
+
+Plot standardised incidence trends.
+
+```{r}
+ggPlot standardised incidence trends.(age_adj_Add state to assess geographical variation._2020,
+       aes(x = Year, y = adj_rate, color = State, group = State)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+
+  scale_x_continuous(
+    breaks = unique(age_adj_Add state to assess geographical variation._2020$Year)
+  ) +
+
+  scale_y_continuous(
+    breaks = seq(5, 30, by = 5),
+    limits = c(0, 30)
+  ) +
+
+  scale_color_tableau(palette = "Tableau 20") +
+
+  labs(
+    y = "Age-adjusted incidence (per 100,000)",
+    color = "State"
+  ) +
+
+  theme_classic(base_size = 12) +
+
+  theme(
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    legend.position = "right"
+  )
+```
+
+Calculate overall crude incidence for the full study period.
+
+```{r}
+crude_Add state to assess geographical variation._overall <- inc_Add state to assess geographical variation. %>%
+  group_by(State) %>%
+  summarise(
+    cases = sum(cases),
+    population = sum(pop_real),
+    crude_ir = (cases / population) * 100000,
+    .groups = "drop"
+  )
+
+crude_Add state to assess geographical variation._overall <- crude_Add state to assess geographical variation._overall %>%
+  mutate(
+    se = sqrt(cases) / population,
+    lower_ci = (crude_ir/100000 - 1.96 * se) * 100000,
+    upper_ci = (crude_ir/100000 + 1.96 * se) * 100000
+  )
+
+
+```
+
+Calculate overall standardised incidence using the census standard population.
+
+```{r}
+inc_Add state to assess geographical variation._total <- inc_Add state to assess geographical variation. %>%
+  group_by(State, Age_categ) %>%
+  summarise(
+    cases = sum(cases),
+    pop_real = sum(pop_real),
+    .groups = "drop"
+  )
+
+inc_weighted_Add state to assess geographical variation. <- inc_Add state to assess geographical variation._total %>%
+  left_join(std_weights1, by = "Age_categ")
+
+age_adj_Add state to assess geographical variation. <- inc_weighted_Add state to assess geographical variation. %>%
+  mutate(
+    age_rate = cases / pop_real,
+    weighted_rate = age_rate * weight
+  ) %>%
+  group_by(State) %>%
+  summarise(
+    adj_rate = sum(weighted_rate) * 100000,
+    .groups = "drop"
+  )
+
+age_adj_Add state to assess geographical variation._ci <- inc_weighted_Add state to assess geographical variation. %>%
+  mutate(
+    age_rate = cases / pop_real,
+    weighted_rate = age_rate * weight,
+    var_component = (weight^2) * (cases / (pop_real^2))
+  ) %>%
+  group_by(State) %>%
+  summarise(
+    adj_rate = sum(weighted_rate),
+    variance = sum(var_component),
+    se = sqrt(variance),
+    lower_ci = (adj_rate - 1.96 * se) * 100000,
+    upper_ci = (adj_rate + 1.96 * se) * 100000,
+    adj_rate = adj_rate * 100000,
+    .groups = "drop"
+  )
+```
+
+## 3.4 Incidence by year
+
+Prepare case and population data for incidence estimation.
+
+```{r}
+cases_year <- NTS_inc1 %>%
+  group_by(Year, Age_categ) %>%
+  summarise(cases = n(), .groups = "drop")
+```
+
+```{r}
+pop_year <- pop %>%
+  group_by(Year, Age_categ) %>%
+  summarise(population = sum(population), .groups = "drop")
+```
+
+```{r}
+inc_year<-left_join(cases_year, pop_year,
+          by = c("Year","Age_categ"))
+```
+
+```{r}
+inc_year$Age_categ <- factor(
+  inc_year$Age_categ,
+  levels = c(
+    "0-4","5-9","10-14","15-19",
+    "20-24","25-29","30-34","35-39",
+    "40-44","45-49","50-54","55-59",
+    "60-64","65-69","70-74","75-79",
+    "80-84","85+"
+  )
+)
+```
+
+```{r}
+inc_year <- inc_year %>%
+  arrange(Year, Age_categ)
+```
+
+```{r}
+inc_year <- inc_year  %>%
+  mutate(pop_real = population * 1000)
+```
+
+Calculate standardised incidence using the census standard population.
+
+```{r}
+inc_weighted_year_2020 <- inc_year %>%
+  left_join(std_weights1, by = "Age_categ")
+
+age_adj_year_2020 <- inc_weighted_year_2020 %>%
+  mutate(age_rate = cases / pop_real) %>%
+  mutate(weighted_rate = age_rate * weight) %>%
+  group_by(Year) %>%
+  summarise(
+    adj_rate = sum(weighted_rate) * 100000,
+    .groups = "drop"
+  )
+
+age_adj_year_ci_2020 <- inc_weighted_year_2020 %>%
+  mutate(age_rate = cases / pop_real) %>%
+  mutate(weighted_rate = age_rate * weight) %>%
+  mutate(var_component = (weight^2) * (cases / (pop_real^2))) %>%
+  group_by(Year) %>%
+  summarise(
+    adj_rate = sum(weighted_rate),
+    variance = sum(var_component),
+    se = sqrt(variance),
+    lower_ci = (adj_rate - 1.96 * se) * 100000,
+    upper_ci = (adj_rate + 1.96 * se) * 100000,
+    adj_rate = adj_rate * 100000,
+    .groups = "drop"
+  )
+
+age_adj_year_ci_2020
+```
+
+Calculate crude annual incidence using absolute population denominators.
+
+```{r}
+crude_year <- inc_year %>%
+  group_by(Year) %>%
+  summarise(
+    cases = sum(cases),
+    population = sum(pop_real),
+    rate = (cases / population) * 100000,
+    .groups = "drop"
+  )
+
+crude_year <- crude_year %>%
+  mutate(
+    se = sqrt(cases) / population
+  )
+
+crude_year <- crude_year %>%
+  mutate(
+    lower_ci = (rate/100000 - 1.96 * se) * 100000,
+    upper_ci = (rate/100000 + 1.96 * se) * 100000
+  )
+crude_year
+```
+
+```{r}
+ggPlot standardised incidence trends.(age_adj_year_ci_2020,
+       aes(x = Year, y = adj_rate)) +
+
+  geom_ribbon(
+    aes(ymin = lower_ci, ymax = upper_ci),
+    fill = "#6baed6",
+    alpha = 0.3
+  ) +
+
+  geom_line(
+    color = "#08519c",
+    linewidth = 1.2
+  ) +
+
+  geom_point(
+    color = "#08519c",
+    size = 3
+  ) +
+
+  scale_x_continuous(
+    breaks = age_adj_year_ci_2020$Year
+  ) +
+
+  scale_y_continuous(
+    breaks = seq(5, 15, by = 5),
+    limits = c(0, 15)
+  ) +
+
+  labs(
+    y = "Age-adjusted incidence (per 100,000)"
+  ) +
+
+  theme_classic(base_size = 12) +
+
+  theme(
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black")
+  )
+```
+
+overall
+
+```{r}
+crude_overall <- inc_year %>%
+  summarise(
+    cases = sum(cases),
+    population = sum(pop_real),
+    crude_ir = (cases / population) * 100000
+  )
+
+crude_overall <- crude_overall %>%
+  mutate(
+    se = sqrt(cases) / population,
+    lower_ci = (crude_ir/100000 - 1.96 * se) * 100000,
+    upper_ci = (crude_ir/100000 + 1.96 * se) * 100000
+  )
+```
+
+Calculate overall standardised incidence for the full study period.
+
+```{r}
+inc_total <- inc_year%>%
+  group_by(Age_categ) %>%
+  summarise(
+    cases = sum(cases),
+    pop_real = sum(pop_real),
+    .groups = "drop"
+  )
+
+inc_weighted_total <- inc_total %>%
+  left_join(std_weights1, by = "Age_categ")
+
+age_adj_overall <- inc_weighted_total %>%
+  mutate(
+    age_rate = cases / pop_real,
+    weighted_rate = age_rate * weight
+  ) %>%
+  summarise(
+    adj_rate = sum(weighted_rate) * 100000
+  )
+
+age_adj_overall_ci <- inc_weighted_total %>%
+  mutate(
+    age_rate = cases / pop_real,
+    weighted_rate = age_rate * weight,
+    var_component = (weight^2) * (cases / (pop_real^2))
+  ) %>%
+  summarise(
+    adj_rate = sum(weighted_rate),
+    variance = sum(var_component),
+    se = sqrt(variance),
+    lower_ci = (adj_rate - 1.96 * se) * 100000,
+    upper_ci = (adj_rate + 1.96 * se) * 100000,
+    adj_rate = adj_rate * 100000
+  )
+```
+
+## 3.5 Incidence by age group
+
+Prepare case and population data for incidence estimation.
+
+```{r}
+crude_age <- inc_reg3 %>%
+  group_by(Age_group) %>%
+  summarise(
+    cases = sum(cases),
+    population = sum(pop_real),
+    crude_ir = (cases / population) * 100000,
+    .groups = "drop"
+  )
+
+crude_age <- crude_age %>%
+  mutate(
+    se = sqrt(cases) / population,
+    lower_ci = (crude_ir/100000 - 1.96 * se) * 100000,
+    upper_ci = (crude_ir/100000 + 1.96 * se) * 100000
+  )
+```
+
+# 4. Age-sex-standardised incidence
+
+##### by Add state to assess geographical variation.
+
+Prepare case and population data for incidence estimation.
+
+```{r}
+std_pop_sex <- read_excel("std_pop_sex.xlsx")
+```
+
+\`
+
+```{r}
+std_pop_sex$Age_categ <- factor(
+  std_pop_sex$Age_categ,
+  levels = c(
+    "0-4","5-9","10-14","15-19",
+    "20-24","25-29","30-34","35-39",
+    "40-44","45-49","50-54","55-59",
+    "60-64","65-69","70-74","75-79",
+    "80-84","85+"
+  )
+)
+```
+
+```{r}
+std_pop_sex <- std_pop_sex %>% select(Age_categ, Sex, std_pop) %>% 
+  arrange(Age_categ, Sex)
+```
+
+```{r}
+cases_Add state to assess geographical variation._sex <- NTS_inc1 %>%
+  count(Year, State, Age_categ,Sex, name = "cases") %>%
+  complete(Year, State, Age_categ,Sex, fill = list(cases = 0))
+```
+
+```{r}
+pop_Add state to assess geographical variation._sex <- pop %>%
+  group_by(Year, State, Age_categ, Sex) %>%
+  summarise(population = sum(population), .groups = "drop")
+```
+
+```{r}
+inc_Add state to assess geographical variation._sex<-left_join(cases_Add state to assess geographical variation._sex, pop_Add state to assess geographical variation._sex,
+          by = c("Year","State","Age_categ", "Sex"))
+```
+
+```{r}
+inc_Add state to assess geographical variation._sex$Age_categ <- factor(
+  inc_Add state to assess geographical variation._sex$Age_categ,
+  levels = c(
+    "0-4","5-9","10-14","15-19",
+    "20-24","25-29","30-34","35-39",
+    "40-44","45-49","50-54","55-59",
+    "60-64","65-69","70-74","75-79",
+    "80-84","85+"
+  )
+)
+```
+
+```{r}
+inc_Add state to assess geographical variation._sex <- inc_Add state to assess geographical variation._sex %>%
+  arrange(Year, State, Age_categ, Sex)
+```
+
+```{r}
+inc_Add state to assess geographical variation._sex <- inc_Add state to assess geographical variation._sex  %>%
+  mutate(pop_real = population * 1000)
+```
+
+```{r}
+inc_Add state to assess geographical variation._sex <- inc_Add state to assess geographical variation._sex %>%
+  filter(
+    Sex != "Unknown",
+    Age_categ != "Unknown"
+  )
+```
+
+Calculate standardised incidence using the census standard population.
+
+```{r}
+std_weights_sex <-std_pop_sex %>%
+  mutate(weight = std_pop / sum(std_pop))
+
+inc_weighted_Add state to assess geographical variation._sex2020 <- inc_Add state to assess geographical variation._sex %>%
+  left_join(std_weights_sex, by = c("Age_categ", "Sex"))
+
+age_sex_Add state to assess geographical variation._2020 <- inc_weighted_Add state to assess geographical variation._sex2020 %>%
+  mutate(age_rate = cases / pop_real) %>%
+  mutate(weighted_rate = age_rate * weight) %>%
+  group_by(Year, State) %>%
+  summarise(
+    adj_rate = sum(weighted_rate) * 100000,
+    .groups = "drop"
+  )
+
+age_sex_Add state to assess geographical variation._ci_2020 <- inc_weighted_Add state to assess geographical variation._sex2020 %>%
+  mutate(age_rate = cases / pop_real,
+         weighted_rate = age_rate * weight,
+         var_component = (weight^2) * (cases / (pop_real^2))) %>%
+  group_by(Year, State) %>%
+  summarise(
+    adj_rate = sum(weighted_rate),
+    variance = sum(var_component),
+    se = sqrt(variance),
+    lower_ci = (adj_rate - 1.96 * se) * 100000,
+    upper_ci = (adj_rate + 1.96 * se) * 100000,
+    adj_rate = adj_rate * 100000,
+    .groups = "drop"
+  )
+
+age_sex_Add state to assess geographical variation._ci_2020
+```
+
+overall Add state to assess geographical variation.
+
+```{r}
+inc_Add state to assess geographical variation._totals <- inc_Add state to assess geographical variation._sex %>%
+  group_by(State, Age_categ, Sex) %>%
+  summarise(
+    cases = sum(cases),
+    pop_real = sum(pop_real),
+    .groups = "drop"
+  )
+
+inc_weighted_Add state to assess geographical variation.s <- inc_Add state to assess geographical variation._totals %>%
+  left_join(std_weights_sex, by = c("Age_categ", "Sex"))
+
+age_sex_Add state to assess geographical variation.s <- inc_weighted_Add state to assess geographical variation.s %>%
+  mutate(
+    age_rate = cases / pop_real,
+    weighted_rate = age_rate * weight
+  ) %>%
+  group_by(State) %>%
+  summarise(
+    adj_rate = sum(weighted_rate) * 100000,
+    .groups = "drop"
+  )
+
+age_sex_Add state to assess geographical variation.s_ci_2020 <- inc_weighted_Add state to assess geographical variation.s %>%
+  mutate(age_rate = cases / pop_real,
+         weighted_rate = age_rate * weight,
+         var_component = (weight^2) * (cases / (pop_real^2))) %>%
+  group_by(State) %>%
+  summarise(
+    adj_rate = sum(weighted_rate),
+    variance = sum(var_component),
+    se = sqrt(variance),
+    lower_ci = (adj_rate - 1.96 * se) * 100000,
+    upper_ci = (adj_rate + 1.96 * se) * 100000,
+    adj_rate = adj_rate * 100000,
+    .groups = "drop"
+  )
+
+age_sex_Add state to assess geographical variation.s_ci_2020
+```
+
+Plot standardised incidence trends. age-sex-standardised IR by Add state to assess geographical variation. Plot standardised incidence trends.
+
+```{r}
+ggPlot standardised incidence trends.(age_sex_Add state to assess geographical variation._2020,
+       aes(x = Year, y = adj_rate, color = State, group = State)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+
+  scale_x_continuous(
+    breaks = unique(age_sex_Add state to assess geographical variation._2020$Year)
+  ) +
+
+  scale_y_continuous(
+    breaks = seq(5, 30, by = 5),
+    limits = c(0, 30)
+  ) +
+
+  scale_color_tableau(palette = "Tableau 20") +
+
+  labs(
+    x = NULL,
+    y = "Age-sex-standardised incidence rate (per 100,000)",
+    color = "State"
+  ) +
+
+  theme_classic(base_size = 12) +
+
+  theme(
+  axis.title.x = element_text(size = 16, face = "bold"),
+  axis.title.y = element_text(size = 16, face = "bold"),
+  axis.text = element_text(color = "black", size = 12),
+  legend.title = element_text(size = 14, face = "bold"),
+  legend.text = element_text(size = 12),
+  legend.position = "right"
+)
+```
+
+## 4.2 Age-sex-standardised incidence by year
+
+Prepare case and population data for incidence estimation.
+
+```{r}
+cases_year_sex <- NTS_inc1 %>%
+  group_by(Year, Age_categ, Sex) %>%
+  summarise(cases = n(), .groups = "drop")
+```
+
+```{r}
+pop_year_sex <- pop %>%
+  group_by(Year, Age_categ, Sex) %>%
+  summarise(population = sum(population), .groups = "drop")
+```
+
+```{r}
+inc_year_sex<-left_join(cases_year_sex, pop_year_sex,
+          by = c("Year","Age_categ", "Sex"))
+```
+
+```{r}
+inc_year_sex$Age_categ <- factor(
+  inc_year_sex$Age_categ,
+  levels = c(
+    "0-4","5-9","10-14","15-19",
+    "20-24","25-29","30-34","35-39",
+    "40-44","45-49","50-54","55-59",
+    "60-64","65-69","70-74","75-79",
+    "80-84","85+"
+  )
+)
+```
+
+```{r}
+inc_year_sex <- inc_year_sex %>%
+  arrange(Year, Age_categ, Sex)
+```
+
+```{r}
+inc_year_sex <- inc_year_sex  %>%
+  mutate(pop_real = population * 1000)
+```
+
+Calculate standardised incidence using the census standard population.
+
+```{r}
+inc_weighted_year_sex2020 <- inc_year_sex %>%
+  left_join(std_weights_sex, by = c("Age_categ", "Sex"))
+
+age_sex_year <- inc_weighted_year_sex2020 %>%
+  mutate(age_rate = cases / pop_real) %>%
+  mutate(weighted_rate = age_rate * weight) %>%
+  group_by(Year) %>%
+  summarise(
+    adj_rate = sum(weighted_rate) * 100000,
+    .groups = "drop"
+  )
+
+age_sex_year_ci_2020 <- inc_weighted_year_sex2020 %>%
+  mutate(age_rate = cases / pop_real,
+         weighted_rate = age_rate * weight,
+         var_component = (weight^2) * (cases / (pop_real^2))) %>%
+  group_by(Year) %>%
+  summarise(
+    adj_rate = sum(weighted_rate),
+    variance = sum(var_component),
+    se = sqrt(variance),
+    lower_ci = (adj_rate - 1.96 * se) * 100000,
+    upper_ci = (adj_rate + 1.96 * se) * 100000,
+    adj_rate = adj_rate * 100000,
+    .groups = "drop"
+  )
+
+age_sex_year_ci_2020
+```
+
+```{r}
+age_only <- inc_year %>%   # no Sex column
+  left_join(std_weights1, by = "Age_categ") %>%
+  mutate(rate = cases / pop_real,
+         weighted = rate * weight) %>%
+  group_by(Year) %>%
+  summarise(rate = sum(weighted))
+
+age_sex <- inc_year_sex %>%
+  left_join(std_weights_sex, by = c("Age_categ","Sex")) %>%
+  mutate(rate = cases / pop_real,
+         weighted = rate * weight) %>%
+  group_by(Year) %>%
+  summarise(rate = sum(weighted))
+
+age_only %>%
+  left_join(age_sex, by = "Year") %>%
+  mutate(diff = rate.x - rate.y)
+```
+
+Plot standardised incidence trends.
+
+```{r}
+ggPlot standardised incidence trends.(age_sex_year_ci_2020,
+       aes(x = Year, y = adj_rate)) +
+
+  geom_ribbon(
+    aes(ymin = lower_ci, ymax = upper_ci),
+    fill = "#6baed6",
+    alpha = 0.3
+  ) +
+
+  geom_line(
+    color = "#08519c",
+    linewidth = 1.2
+  ) +
+
+  geom_point(
+    color = "#08519c",
+    size = 3
+  ) +
+
+  scale_x_continuous(
+    breaks = age_sex_year_ci_2020$Year
+  ) +
+
+  scale_y_continuous(
+    breaks = seq(5, 15, by = 5),
+    limits = c(0, 15)
+  ) +
+
+  labs(
+    x = NULL, 
+    y = "Age-sex-standardised incidence rate (per 100,000)"
+  ) +
+
+  theme_classic(base_size = 12) +
+
+  theme(
+  axis.title.x = element_text(size = 24, face = "bold"),
+  axis.title.y = element_text(size = 24, face = "bold"),
+  axis.text = element_text(color = "black", size = 22)
+)
+```
+
+Calculate overall age-sex-standardised incidence for the full study period.
+
+```{r}
+inc_totals <- inc_year_sex%>%
+  group_by(Age_categ, Sex) %>%
+  summarise(
+    cases = sum(cases),
+    pop_real = sum(pop_real),
+    .groups = "drop"
+  )
+
+inc_weighted_totals <- inc_totals %>%
+  left_join(std_weights_sex, by = c("Age_categ","Sex"))
+
+age_adj_overalls <- inc_weighted_totals %>%
+  mutate(
+    age_rate = cases / pop_real,
+    weighted_rate = age_rate * weight
+  ) %>%
+  summarise(
+    adj_rate = sum(weighted_rate) * 100000
+  )
+
+age_adj_overalls_ci <- inc_weighted_totals %>%
+  mutate(
+    age_rate = cases / pop_real,
+    weighted_rate = age_rate * weight,
+    var_component = (weight^2) * (cases / (pop_real^2))
+  ) %>%
+  summarise(
+    adj_rate = sum(weighted_rate),
+    variance = sum(var_component),
+    se = sqrt(variance),
+    lower_ci = (adj_rate - 1.96 * se) * 100000,
+    upper_ci = (adj_rate + 1.96 * se) * 100000,
+    adj_rate = adj_rate * 100000
+  )
+
+age_adj_overalls_ci
+```

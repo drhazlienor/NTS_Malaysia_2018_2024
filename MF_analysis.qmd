@@ -1,0 +1,422 @@
+---
+title: "Multiplication Factor Analysis for Human Non-typhoidal Salmonella in Malaysia, 2018–2024"
+author: "Hazlienor Mohd Hatta"
+subtitle: "R script for DrPH Thesis: Incidence, Serovar Dynamics and Forecasting of Human Non-typhoidal Salmonella Disease in Malaysia"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Introduction
+
+This Quarto document contains the R workflow for the multiplication factor (MF) analysis conducted for the DrPH thesis **"Incidence, Serovar Dynamics and Forecasting of Human Non-typhoidal Salmonella Disease in Malaysia"** by **Hazlienor Mohd Hatta**.
+
+The purpose of this analysis is to estimate the extent of underestimation of human non-typhoidal *Salmonella* (NTS) infection in Malaysia using a surveillance pyramid approach. The workflow derives annual and overall multiplication factors for 2018–2024 by incorporating uncertainty in reporting, laboratory confirmation, healthcare-seeking behaviour, and symptomatic infection. Monte Carlo simulation is used to generate uncertainty intervals for total MF, estimated community cases, under-ascertainment (UA), and under-reporting (UR). A sensitivity analysis is also conducted to assess the influence of assumptions around laboratory confirmation probability.
+
+# Analysis workflow
+
+The analysis follows these main steps:
+
+1.  Load required R packages.
+2.  Define annual surveillance pyramid inputs.
+3.  Specify surveillance pyramid levels and parameter assumptions.
+4.  Estimate annual and overall multiplication factors using Monte Carlo simulation.
+5.  Decompose total underestimation into under-ascertainment and under-reporting components.
+6.  Conduct sensitivity analysis for the laboratory confirmation component.
+7.  Visualise and compare base and sensitivity model estimates.
+
+# 1. Load packages
+
+```{r setup}
+library(tidyverse)
+```
+
+# 2. Define surveillance pyramid input data
+
+The input data summarise the annual counts used to estimate probabilities at each level of the surveillance pyramid. The final row represents the overall estimate for the full study period (2018–2024).
+
+```{r input-data}
+pyramid_data <- data.frame(
+  year = c("2018", "2019", "2020", "2021", "2022", "2023", "2024", "2018-2024"),
+  reported = c(2942, 3388, 3359, 2670, 2995, 3826, 4848, 24028),
+  not_reported = c(688, 1222, 922, 711, 837, 1197, 876, 6453),
+  lab_seek = c(168, 165, 164, 241, 52, 122, 327, 1239),
+  seek = c(2959, 3371, 3126, 1628, 2762, 3433, 5042, 22321),
+  symptom = c(4882, 4599, 3828, 2470, 4803, 6497, 9010, 36089)
+)
+
+pyramid_data
+```
+
+# 3. Define surveillance pyramid levels
+
+The surveillance pyramid was conceptualised as follows:
+
+-   **Level 5:** Reported laboratory-confirmed cases in national laboratory-based surveillance.
+-   **Level 4:** Laboratory-confirmed cases among healthcare-seeking cases.
+-   **Level 3:** Symptomatic cases who sought healthcare.
+-   **Level 2:** Symptomatic infections.
+-   **Level 1:** All infections, including symptomatic and asymptomatic infections.
+
+The total multiplication factor was calculated by multiplying the inverse probabilities between consecutive surveillance levels.
+
+# 4. Base Monte Carlo function
+
+This function estimates the total multiplication factor and the corresponding estimated community cases. Uncertainty is propagated using Monte Carlo simulation with beta distributions for probability parameters.
+
+```{r base-mc-function}
+run_mf_simulation <- function(reported,
+                              not_reported,
+                              lab_seek,
+                              seek,
+                              symptom,
+                              n_sim = 10000) {
+  
+  # Probability that a laboratory-confirmed case is reported
+  p_report <- rbeta(n_sim, reported, not_reported)
+  
+  # Probability of laboratory confirmation among healthcare-seeking cases
+  p_lab_seek <- rbeta(
+    n_sim,
+    shape1 = lab_seek,
+    shape2 = pmax(seek - lab_seek, 1)
+  )
+  
+  # Truncate very low laboratory-confirmation probabilities to avoid extreme values
+  p_lab_seek <- pmax(p_lab_seek, 0.02)
+  
+  # Probability of seeking healthcare among symptomatic cases
+  p_seek <- rbeta(
+    n_sim,
+    shape1 = seek,
+    shape2 = pmax(symptom - seek, 1)
+  )
+  
+  # Probability of being symptomatic among all infections
+  # Assumption: 95% symptomatic and 5% asymptomatic
+  p_symptom <- rbeta(n_sim, 95, 5)
+  
+  # Total multiplication factor
+  mf_total <- (1 / p_report) *
+    (1 / p_lab_seek) *
+    (1 / p_seek) *
+    (1 / p_symptom)
+  
+  # Estimated community cases
+  true_cases <- reported * mf_total
+  
+  c(
+    MF_low = quantile(mf_total, 0.025),
+    MF_med = quantile(mf_total, 0.5),
+    MF_high = quantile(mf_total, 0.975),
+    true_low = quantile(true_cases, 0.025),
+    true_med = quantile(true_cases, 0.5),
+    true_high = quantile(true_cases, 0.975)
+  )
+}
+```
+
+# 5. Estimate total multiplication factor by year
+
+```{r total-mf-results}
+results_total_mf <- pyramid_data %>%
+  rowwise() %>%
+  mutate(res = list(run_mf_simulation(reported, not_reported, lab_seek, seek, symptom))) %>%
+  mutate(
+    MF_low = res[1],
+    MF_med = res[2],
+    MF_high = res[3],
+    true_low = res[4],
+    true_med = res[5],
+    true_high = res[6]
+  ) %>%
+  ungroup() %>%
+  select(year, MF_low, MF_med, MF_high, true_low, true_med, true_high)
+
+results_total_mf
+```
+
+# 6. Decompose multiplication factors into UA and UR
+
+This function estimates the component multiplication factors and separates total underestimation into:
+
+-   **Under-ascertainment (UA):** loss before or at healthcare-seeking level, represented by symptomatic and healthcare-seeking components.
+-   **Under-reporting (UR):** loss within the healthcare and surveillance system, represented by laboratory confirmation and reporting components.
+
+```{r component-mc-function}
+run_mf_component_simulation <- function(reported,
+                                        not_reported,
+                                        lab_seek,
+                                        seek,
+                                        symptom,
+                                        n_sim = 10000) {
+  
+  # Reporting probability
+  p_report <- rbeta(n_sim, reported, not_reported)
+  
+  # Laboratory-confirmation probability among healthcare-seeking cases
+  p_lab_seek <- rbeta(
+    n_sim,
+    shape1 = lab_seek,
+    shape2 = pmax(seek - lab_seek, 1)
+  )
+  p_lab_seek <- pmax(p_lab_seek, 0.02)
+  
+  # Healthcare-seeking probability among symptomatic cases
+  p_seek <- rbeta(
+    n_sim,
+    shape1 = seek,
+    shape2 = pmax(symptom - seek, 1)
+  )
+  
+  # Symptomatic probability among all infections
+  p_symptom <- rbeta(n_sim, 95, 5)
+  
+  # Component multiplication factors
+  MF_report <- 1 / p_report
+  MF_lab <- 1 / p_lab_seek
+  MF_seek <- 1 / p_seek
+  MF_symptom <- 1 / p_symptom
+  
+  # Under-ascertainment and under-reporting components
+  UA <- MF_symptom * MF_seek
+  UR <- MF_lab * MF_report
+  
+  # Total multiplication factor and estimated community cases
+  MF_total <- UA * UR
+  true_cases <- reported * MF_total
+  
+  c(
+    MF_low = quantile(MF_total, 0.025),
+    MF_med = quantile(MF_total, 0.5),
+    MF_high = quantile(MF_total, 0.975),
+    true_low = quantile(true_cases, 0.025),
+    true_med = quantile(true_cases, 0.5),
+    true_high = quantile(true_cases, 0.975),
+    MF_report = quantile(MF_report, 0.5),
+    MF_lab = quantile(MF_lab, 0.5),
+    MF_seek = quantile(MF_seek, 0.5),
+    MF_symptom = quantile(MF_symptom, 0.5),
+    UA_low = quantile(UA, 0.025),
+    UA_med = quantile(UA, 0.5),
+    UA_high = quantile(UA, 0.975),
+    UR_low = quantile(UR, 0.025),
+    UR_med = quantile(UR, 0.5),
+    UR_high = quantile(UR, 0.975)
+  )
+}
+```
+
+```{r component-results}
+results_components <- pyramid_data %>%
+  rowwise() %>%
+  mutate(res = list(run_mf_component_simulation(reported, not_reported, lab_seek, seek, symptom))) %>%
+  mutate(
+    MF_low = res[1],
+    MF_med = res[2],
+    MF_high = res[3],
+    true_low = res[4],
+    true_med = res[5],
+    true_high = res[6],
+    MF_report = res[7],
+    MF_lab = res[8],
+    MF_seek = res[9],
+    MF_symptom = res[10],
+    UA_low = res[11],
+    UA_med = res[12],
+    UA_high = res[13],
+    UR_low = res[14],
+    UR_med = res[15],
+    UR_high = res[16]
+  ) %>%
+  ungroup() %>%
+  select(
+    year,
+    MF_low, MF_med, MF_high,
+    UA_low, UA_med, UA_high,
+    UR_low, UR_med, UR_high,
+    MF_report, MF_lab, MF_seek, MF_symptom,
+    true_low, true_med, true_high
+  )
+
+results_components
+```
+
+# 7. Format uncertainty intervals
+
+```{r format-results}
+format_ui <- function(low, med, high, digits = 1) {
+  paste0(round(med, digits), " (", round(low, digits), ", ", round(high, digits), ")")
+}
+
+results_components_formatted <- results_components %>%
+  mutate(
+    MF = format_ui(MF_low, MF_med, MF_high),
+    UA = format_ui(UA_low, UA_med, UA_high),
+    UR = format_ui(UR_low, UR_med, UR_high)
+  ) %>%
+  select(year, MF, UA, UR, MF_report, MF_lab, MF_seek, MF_symptom, true_low, true_med, true_high)
+
+results_components_formatted
+```
+
+# 8. Sensitivity analysis for laboratory confirmation probability
+
+The total multiplication factor is highly influenced by the probability of laboratory confirmation among healthcare-seeking cases. A sensitivity analysis was therefore conducted by replacing the outbreak-derived laboratory confirmation probability with a uniform assumption ranging from 3% to 10%.
+
+```{r sensitivity-function}
+run_mf_sensitivity <- function(reported,
+                               not_reported,
+                               lab_seek,
+                               seek,
+                               symptom,
+                               n_sim = 10000,
+                               mode = "base") {
+  
+  # Reporting probability
+  p_report <- rbeta(n_sim, reported, not_reported)
+  
+  # Laboratory-confirmation probability
+  if (mode == "base") {
+    # Base model: outbreak-derived laboratory confirmation probability
+    p_lab_seek <- rbeta(
+      n_sim,
+      shape1 = lab_seek,
+      shape2 = pmax(seek - lab_seek, 1)
+    )
+  } else if (mode == "sensitivity") {
+    # Sensitivity model: assumed 3%–10% laboratory confirmation probability
+    p_lab_seek <- runif(n_sim, 0.03, 0.10)
+  } else {
+    stop("mode must be either 'base' or 'sensitivity'.")
+  }
+  
+  p_lab_seek <- pmax(p_lab_seek, 0.02)
+  
+  # Healthcare-seeking probability
+  p_seek <- rbeta(
+    n_sim,
+    shape1 = seek,
+    shape2 = pmax(symptom - seek, 1)
+  )
+  
+  # Symptomatic probability
+  p_symptom <- rbeta(n_sim, 95, 5)
+  
+  # Total multiplication factor
+  MF_total <- (1 / p_report) *
+    (1 / p_lab_seek) *
+    (1 / p_seek) *
+    (1 / p_symptom)
+  
+  true_cases <- reported * MF_total
+  
+  c(
+    MF_low = quantile(MF_total, 0.025),
+    MF_med = quantile(MF_total, 0.5),
+    MF_high = quantile(MF_total, 0.975),
+    true_low = quantile(true_cases, 0.025),
+    true_med = quantile(true_cases, 0.5),
+    true_high = quantile(true_cases, 0.975)
+  )
+}
+```
+
+```{r base-vs-sensitivity-results}
+results_base <- pyramid_data %>%
+  rowwise() %>%
+  mutate(res = list(run_mf_sensitivity(reported, not_reported, lab_seek, seek, symptom, mode = "base"))) %>%
+  mutate(
+    MF_low = res[1],
+    MF_med = res[2],
+    MF_high = res[3],
+    true_low = res[4],
+    true_med = res[5],
+    true_high = res[6]
+  ) %>%
+  ungroup() %>%
+  select(year, MF_low, MF_med, MF_high, true_low, true_med, true_high)
+
+results_sensitivity <- pyramid_data %>%
+  rowwise() %>%
+  mutate(res = list(run_mf_sensitivity(reported, not_reported, lab_seek, seek, symptom, mode = "sensitivity"))) %>%
+  mutate(
+    MF_low_sens = res[1],
+    MF_med_sens = res[2],
+    MF_high_sens = res[3],
+    true_low_sens = res[4],
+    true_med_sens = res[5],
+    true_high_sens = res[6]
+  ) %>%
+  ungroup() %>%
+  select(year, MF_low_sens, MF_med_sens, MF_high_sens, true_low_sens, true_med_sens, true_high_sens)
+
+final_compare <- left_join(results_base, results_sensitivity, by = "year")
+
+final_compare
+```
+
+# 9. Visualise base and sensitivity model estimates
+
+```{r prepare-plot-data}
+plot_base <- final_compare %>%
+  select(year, low = MF_low, med = MF_med, high = MF_high) %>%
+  mutate(model = "Outbreak-derived")
+
+plot_sensitivity <- final_compare %>%
+  select(year, low = MF_low_sens, med = MF_med_sens, high = MF_high_sens) %>%
+  mutate(model = "Sensitivity (3–10%)")
+
+plot_data <- bind_rows(plot_base, plot_sensitivity) %>%
+  mutate(
+    year = factor(
+      year,
+      levels = c("2018", "2019", "2020", "2021", "2022", "2023", "2024", "2018-2024")
+    )
+  )
+```
+
+```{r mf-comparison-plot, fig.width=9, fig.height=5}
+ggplot(plot_data, aes(x = year, y = med, group = model, color = model, fill = model)) +
+  geom_ribbon(aes(ymin = low, ymax = high), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = c(
+    "Outbreak-derived" = "#D55E00",
+    "Sensitivity (3–10%)" = "#0072B2"
+  )) +
+  scale_fill_manual(values = c(
+    "Outbreak-derived" = "#D55E00",
+    "Sensitivity (3–10%)" = "#0072B2"
+  )) +
+  labs(
+    title = "Estimated Multiplication Factor (MF) by Year",
+    subtitle = "Comparison of outbreak-derived and sensitivity-adjusted models",
+    x = "Year",
+    y = "Multiplication Factor (MF)",
+    color = NULL,
+    fill = NULL
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    legend.position = "top",
+    legend.title = element_blank(),
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 11)
+  )
+```
+
+# Notes
+
+-   The analysis uses a surveillance pyramid and multiplication factor approach to estimate underestimation of NTS infection.
+-   The beta distribution was used to represent uncertainty around probability parameters derived from count data.
+-   The laboratory confirmation component was explored through sensitivity analysis because it strongly influences the total multiplication factor.
+-   No individual-level or identifiable patient data are included in this script.

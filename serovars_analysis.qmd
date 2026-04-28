@@ -1,0 +1,414 @@
+---
+title: "Serovar Analysis of Human Non-typhoidal Salmonella in Malaysia, 2018–2024"
+author: "Hazlienor Mohd Hatta"
+subtitle: "R script for DrPH Thesis: Incidence, Serovar Dynamics and Forecasting of Human Non-typhoidal Salmonella Disease in Malaysia"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+editor: visual
+---
+
+# Introduction
+
+This Quarto document contains the annotated R workflow used for the serovar analysis of laboratory-confirmed human non-typhoidal *Salmonella* (NTS) isolates in Malaysia from 2018 to 2024. The analysis forms part of the DrPH thesis titled **"Incidence, Serovar Dynamics and Forecasting of Human Non-typhoidal Salmonella Disease in Malaysia"** by **Hazlienor Mohd Hatta**.
+
+The workflow includes data preparation, national serovar ranking, assessment of temporal stability, state-level and age-group variation, and heatmap visualisation of dominant serovars. The analysis excludes isolates recorded as unknown serovar where relevant, and describes proportional serovar distribution across selected demographic and geographical strata.
+
+# 1. Load packages
+
+```{r setup, message=FALSE, warning=FALSE}
+# Core data management and visualisation
+library(tidyverse)
+library(forcats)
+library(readxl)
+library(scales)
+
+# Statistical association and effect size
+library(rcompanion)
+```
+
+# 2. Define file paths and analysis parameters
+
+```{r parameters}
+# Input file
+input_file <- "NTS_inc.xlsx"
+
+# Analysis period
+analysis_years <- 2018:2024
+
+# Label used in the dataset for isolates without assigned serovar
+unknown_serovar <- "S. enterica subsp. enterica (serovar unknown)"
+
+# Number of dominant serovars to display in selected plots
+n_top_serovars <- 10
+
+# State ordering used for figures and tables
+state_order <- c(
+  "Wilayah Persekutuan", "Selangor",
+  "Kedah", "Pulau Pinang", "Perak", "Perlis",
+  "Johor", "Melaka", "Negeri Sembilan",
+  "Kelantan", "Terengganu", "Pahang",
+  "Sabah", "Sarawak"
+)
+
+# Age ordering used for figures and tables
+age_order <- c("Children", "Adolescents", "Adults", "Elderly")
+```
+
+# 3. Import and prepare data
+
+```{r import-data}
+# Import the NTS dataset.
+# Expected variables include Year, State, age_who, Sex, serovar, and Warganegara.
+NTS <- read_excel(input_file)
+
+# Select variables required for serovar analysis and standardise labels.
+sero <- NTS %>%
+  select(Year, State, age_who, Sex, serovar, Warganegara) %>%
+  mutate(
+    Year = as.integer(Year),
+    State = as.character(State),
+    serovar = as.character(serovar),
+    age_who = recode(as.character(age_who), "Older adults" = "Elderly")
+  ) %>%
+  filter(Year %in% analysis_years)
+
+# Quick data check
+sero %>%
+  summarise(
+    total_records = n(),
+    years = paste(range(Year, na.rm = TRUE), collapse = "-"),
+    states = n_distinct(State),
+    serovars = n_distinct(serovar)
+  )
+```
+
+# 4. National serovar ranking by year
+
+This section summarises the top ten serovars nationally for each year and assesses whether dominant serovars remain stable over time.
+
+```{r national-ranking-manual}
+# Manually defined annual top-ten serovar ranking based on national frequency tables.
+# Rank 1 indicates the most frequent serovar for that year.
+srank <- tibble(
+  Year = rep(analysis_years, each = 10),
+  Rank = rep(1:10, times = length(analysis_years)),
+  Serovar = c(
+    # 2018
+    "Enteritidis", "Weltevreden", "Paratyphi B", "Stanley", "Typhimurium",
+    "Newport", "Bareilly", "Agona", "Saintpaul", "Bovismorbificans",
+
+    # 2019
+    "Enteritidis", "Weltevreden", "Paratyphi B", "Stanley", "Newport",
+    "Hindmarsh", "Bareilly", "Bovismorbificans", "Agona", "Typhimurium",
+
+    # 2020
+    "Enteritidis", "Weltevreden", "Paratyphi B", "Typhimurium", "Stanley",
+    "Hindmarsh", "Agona", "Bareilly", "Newport", "Corvallis",
+
+    # 2021
+    "Enteritidis", "Weltevreden", "Paratyphi B", "Stanley", "Typhimurium",
+    "Hindmarsh", "Bareilly", "Agona", "Newport", "Corvallis",
+
+    # 2022
+    "Enteritidis", "Weltevreden", "Paratyphi B", "Stanley", "Hindmarsh",
+    "Corvallis", "Typhimurium", "Newport", "Agona", "Bareilly",
+
+    # 2023
+    "Enteritidis", "Weltevreden", "Stanley", "Paratyphi B", "Typhimurium",
+    "Bareilly", "Hindmarsh", "Newport", "Albany", "Agona",
+
+    # 2024
+    "Enteritidis", "Weltevreden", "Stanley", "Paratyphi B", "Bareilly",
+    "Hindmarsh", "Newport", "Brancaster", "Agona", "Typhimurium"
+  )
+)
+```
+
+```{r national-ranking-summary}
+# Frequency of appearance among the annual top-ten list.
+rank_frequency <- srank %>%
+  count(Serovar, sort = TRUE)
+
+rank_frequency
+
+# Summary of rank stability across years.
+summary_table <- srank %>%
+  group_by(Serovar) %>%
+  summarise(
+    Frequency = n(),
+    Mean_Rank = round(mean(Rank), 2),
+    Top3_Count = sum(Rank <= 3),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Category = case_when(
+      Mean_Rank <= 3 ~ "Highly dominant",
+      Mean_Rank <= 6 ~ "Moderately dominant",
+      TRUE ~ "Occasional"
+    )
+  ) %>%
+  arrange(Mean_Rank)
+
+summary_table
+```
+
+```{r national-rank-heatmap, fig.width=8, fig.height=5}
+# Heatmap of annual ranking among top-ten serovars.
+ggplot(srank, aes(x = factor(Year), y = Serovar, fill = Rank)) +
+  geom_tile(color = NA) +
+  scale_fill_gradientn(
+    colours = c("#08306B", "#2171B5", "#6BAED6", "#C6DBEF", "#DEEBF7"),
+    breaks = 1:10,
+    labels = 1:10
+  ) +
+  scale_y_discrete(limits = rev) +
+  labs(x = NULL, y = NULL, fill = "Rank") +
+  theme_classic() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+```
+
+# 5. State-level serovar distribution
+
+This section examines geographical variation in serovar distribution across Malaysian states. Unknown serovars are excluded from the proportion denominator for this descriptive comparison.
+
+```{r top-serovars-state}
+# Identify the top serovars nationally, excluding unknown serovar.
+top_serovars <- sero %>%
+  filter(!is.na(serovar), serovar != unknown_serovar) %>%
+  count(serovar, sort = TRUE) %>%
+  slice_head(n = n_top_serovars) %>%
+  pull(serovar)
+
+top_serovars
+```
+
+```{r state-serovar-table}
+# Calculate state-level serovar proportions.
+# Denominator: all known serovars within each state.
+state_sero <- sero %>%
+  filter(!is.na(serovar), serovar != unknown_serovar) %>%
+  count(State, serovar, name = "Cases") %>%
+  group_by(State) %>%
+  mutate(Total_known_serovar = sum(Cases), Prop = Cases / Total_known_serovar) %>%
+  ungroup() %>%
+  filter(serovar %in% top_serovars)
+
+# Order serovars by mean state-level proportion.
+state_serovar_order <- state_sero %>%
+  group_by(serovar) %>%
+  summarise(mean_prop = mean(Prop, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(mean_prop)) %>%
+  pull(serovar)
+
+state_sero <- state_sero %>%
+  mutate(
+    State = factor(State, levels = state_order),
+    serovar = factor(serovar, levels = rev(state_serovar_order))
+  )
+
+state_sero
+```
+
+```{r state-serovar-heatmap, fig.width=10, fig.height=6}
+# Heatmap of dominant serovar proportions by state.
+ggplot(state_sero, aes(x = State, y = serovar, fill = Prop)) +
+  geom_tile(color = NA) +
+  scale_fill_gradientn(
+    colours = c("#DEEBF7", "#C6DBEF", "#6BAED6", "#2171B5", "#08306B"),
+    name = "Proportion",
+    breaks = c(0, 0.2, 0.4, 0.6),
+    limits = c(0, 0.6),
+    oob = scales::squish
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_classic() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 12),
+    axis.text.y = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11)
+  )
+```
+
+```{r state-serovar-association}
+# Statistical test of association between state and serovar distribution.
+# For sparse data, interpret chi-square results cautiously.
+state_serovar_table <- sero %>%
+  filter(!is.na(State), !is.na(serovar), serovar != unknown_serovar) %>%
+  count(State, serovar) %>%
+  pivot_wider(names_from = serovar, values_from = n, values_fill = 0) %>%
+  column_to_rownames("State") %>%
+  as.matrix()
+
+chisq_state_serovar <- chisq.test(state_serovar_table)
+chisq_state_serovar
+
+# Effect size using Cramer's V.
+cramerV(state_serovar_table)
+```
+
+# 6. State-year serovar distribution
+
+This section describes temporal variation in dominant serovars within each state.
+
+```{r state-year-serovar-data}
+# Calculate proportions by state and year.
+# Denominator: all known serovars within each state-year combination.
+state_year_sero_plot <- sero %>%
+  filter(!is.na(serovar), serovar != unknown_serovar) %>%
+  count(State, Year, serovar, name = "Cases") %>%
+  complete(State, Year = analysis_years, serovar, fill = list(Cases = 0)) %>%
+  group_by(State, Year) %>%
+  mutate(
+    Total_known_serovar = sum(Cases),
+    Prop = if_else(Total_known_serovar > 0, Cases / Total_known_serovar, NA_real_)
+  ) %>%
+  ungroup() %>%
+  filter(serovar %in% top_serovars)
+
+# Order variables for plotting.
+state_year_sero_plot <- state_year_sero_plot %>%
+  mutate(
+    Year = factor(Year, levels = analysis_years),
+    State = factor(State, levels = state_order),
+    serovar = factor(serovar, levels = rev(state_serovar_order))
+  )
+```
+
+```{r state-year-serovar-heatmap, fig.width=12, fig.height=10}
+# Faceted heatmap showing state-specific serovar patterns by year.
+ggplot(state_year_sero_plot, aes(x = Year, y = serovar, fill = Prop)) +
+  geom_tile(color = NA) +
+  scale_fill_gradientn(
+    colours = c("#DEEBF7", "#C6DBEF", "#6BAED6", "#2171B5", "#08306B"),
+    name = "Proportion",
+    breaks = c(0, 0.2, 0.4, 0.6),
+    limits = c(0, 0.6),
+    oob = scales::squish,
+    na.value = "grey90"
+  ) +
+  facet_wrap(~ State, ncol = 3, drop = FALSE) +
+  labs(x = NULL, y = NULL) +
+  theme_classic() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    strip.text = element_text(size = 11, face = "bold"),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+```
+
+# 7. Age-group serovar distribution
+
+This section examines variation in serovar distribution across age groups and over time. Records with unknown age group are excluded from age-stratified analyses.
+
+```{r age-serovar-data}
+# Identify top serovars among records with known age group.
+top_serovars_age <- sero %>%
+  filter(!is.na(serovar), serovar != unknown_serovar, age_who != "Unknown") %>%
+  count(serovar, sort = TRUE) %>%
+  slice_head(n = n_top_serovars) %>%
+  pull(serovar)
+
+# Calculate age-year serovar proportions.
+# Denominator: all known serovars within each age-year combination.
+age_year_sero_plot <- sero %>%
+  filter(!is.na(serovar), serovar != unknown_serovar, age_who != "Unknown") %>%
+  count(age_who, Year, serovar, name = "Cases") %>%
+  complete(age_who, Year = analysis_years, serovar, fill = list(Cases = 0)) %>%
+  group_by(age_who, Year) %>%
+  mutate(
+    Total_known_serovar = sum(Cases),
+    Prop = if_else(Total_known_serovar > 0, Cases / Total_known_serovar, NA_real_)
+  ) %>%
+  ungroup() %>%
+  filter(serovar %in% top_serovars_age)
+
+# Order serovars based on mean proportion across age groups and years.
+age_serovar_order <- age_year_sero_plot %>%
+  group_by(serovar) %>%
+  summarise(mean_prop = mean(Prop, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(mean_prop)) %>%
+  pull(serovar)
+
+age_year_sero_plot <- age_year_sero_plot %>%
+  mutate(
+    age_who = factor(age_who, levels = age_order),
+    Year = factor(Year, levels = analysis_years),
+    serovar = factor(serovar, levels = rev(age_serovar_order))
+  )
+```
+
+```{r age-year-serovar-heatmap, fig.width=10, fig.height=7}
+# Faceted heatmap showing age-specific serovar patterns by year.
+ggplot(age_year_sero_plot, aes(x = Year, y = serovar, fill = Prop)) +
+  geom_tile(color = NA) +
+  scale_fill_gradientn(
+    colours = c("#DEEBF7", "#C6DBEF", "#6BAED6", "#2171B5", "#08306B"),
+    name = "Proportion",
+    breaks = c(0, 0.2, 0.4, 0.6),
+    limits = c(0, 0.6),
+    oob = scales::squish,
+    na.value = "grey90"
+  ) +
+  facet_wrap(~ age_who, ncol = 2, drop = FALSE) +
+  labs(x = NULL, y = NULL) +
+  theme_classic() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 11),
+    axis.text.y = element_text(size = 11),
+    strip.text = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11)
+  )
+```
+
+```{r age-serovar-summary}
+# Top ten serovars within each age group.
+top_sero_age <- sero %>%
+  filter(!is.na(serovar), serovar != unknown_serovar, age_who != "Unknown") %>%
+  count(age_who, serovar, name = "Cases") %>%
+  group_by(age_who) %>%
+  slice_max(order_by = Cases, n = n_top_serovars, with_ties = FALSE) %>%
+  arrange(age_who, desc(Cases)) %>%
+  mutate(Rank = row_number()) %>%
+  ungroup()
+
+top_sero_age
+
+# Distribution of records by age group.
+age_distribution <- sero %>%
+  count(age_who, name = "Cases") %>%
+  mutate(
+    Total = sum(Cases),
+    Prop = Cases / Total,
+    Percent = Prop * 100
+  )
+
+age_distribution
+```
+
+# Notes for interpretation
+
+-   Unknown serovars were excluded from serovar proportion analyses to avoid diluting the distribution of assigned serovars.
+-   Proportions were calculated within each stratum, such as state, state-year, or age-year, to describe relative serovar composition.
+-   Chi-square tests evaluate statistical association between state and serovar distribution but should be interpreted cautiously when sparse cells are present.
+-   Cramer's V provides an effect size for the association between state and serovar distribution.
+-   Heatmaps are descriptive and intended to support interpretation of dominant and secondary serovar patterns across time, geography, and age group.

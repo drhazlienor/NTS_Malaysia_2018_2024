@@ -1,0 +1,791 @@
+---
+title: "Antimicrobial Resistance Analysis of Human Non-typhoidal Salmonella, Malaysia, 2018–2024"
+author: "Hazlienor Mohd Hatta"
+subtitle: "R script for DrPH Thesis: Incidence, Serovar Dynamics and Forecasting of Human Non-typhoidal Salmonella Disease in Malaysia"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+editor: visual
+---
+
+# Introduction
+
+This Quarto document contains the R workflow for the antimicrobial resistance (AMR) analysis conducted for the DrPH thesis titled **"Incidence, Serovar Dynamics and Forecasting of Human Non-typhoidal Salmonella Disease in Malaysia"** by **Hazlienor Mohd Hatta**.
+
+The analysis uses human non-typhoidal *Salmonella* (NTS) surveillance data from Malaysia, 2018–2024. The workflow includes data import, cleaning of antimicrobial susceptibility testing (AST) results, classification of drug-resistant (DR) and multidrug-resistant (MDR) isolates, estimation of resistance proportions, and assessment of AMR patterns by year, serovar, state/region, specimen type, and age group.
+
+> **Note:** This script is intended for reproducible analysis. No individual-level identifiable patient information should be shared in the public repository.
+
+# Analysis workflow
+
+The AMR analysis follows these steps:
+
+1.  Load required R packages and import WHONET-derived AMR data.
+2.  Clean AST variables and standardise susceptibility results.
+3.  Define antimicrobial classes, drug resistance (DR), and multidrug resistance (MDR).
+4.  Estimate overall resistance proportions by antibiotic.
+5.  Assess temporal trends in resistance by year.
+6.  Describe DR and MDR patterns by serovar.
+7.  Examine geographical variation by state and region.
+8.  Examine AMR patterns by specimen type and age group.
+9.  Summarise common MDR resistance combinations.
+
+# Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+# Core data manipulation and plotting
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+
+# Model summaries and confidence intervals
+library(broom)
+library(binom)
+
+# Reordering labels within facets
+library(tidytext)
+
+# Optional: for regression tables if needed
+# library(sjPlot)
+```
+
+# Data import
+
+```{r import-data}
+# Import AMR dataset.
+# Update the file path if the data file is stored in a different folder.
+AMR_raw <- read_excel("IMR Rfinal.xlsx", col_types = "text")
+
+# Create working dataset
+AMR <- AMR_raw
+```
+
+# Define antibiotic variables
+
+```{r antibiotic-list}
+# Antibiotic columns included in the AMR analysis.
+# These columns should contain AST interpretations, usually S, I, or R.
+ast_cols <- c(
+  "AMP", "PIP", "TZP", "CTX", "CRO", "IPM", "MEM", "ETP", "AZM", "TCY",
+  "CIP", "NOR", "PEF", "CXM", "FEP", "CFP", "CSL", "CAZ", "SXT", "CHL",
+  "AMK", "GEN", "AMC", "SAM", "NET", "NIT"
+)
+
+# Check whether all specified antibiotic columns are available in the dataset
+missing_ast_cols <- setdiff(ast_cols, names(AMR))
+missing_ast_cols
+```
+
+# Data cleaning
+
+```{r clean-data}
+# Standardise AST results:
+# - convert to uppercase
+# - remove extra spaces
+# - convert non-informative values to missing
+AMR <- AMR %>%
+  mutate(across(all_of(ast_cols), ~ {
+    x <- as.character(.)
+    x <- str_trim(toupper(x))
+    x[x %in% c("", "NA", "N/A", "ND", ".", "-", "NULL")] <- NA_character_
+    x
+  })) %>%
+  mutate(
+    year = as.numeric(as.character(year))
+  )
+
+# Optional: inspect key variables
+# glimpse(AMR)
+# table(AMR$year, useNA = "ifany")
+```
+
+# Define antimicrobial classes, DR and MDR
+
+```{r define-dr-mdr}
+# Define resistance to antimicrobial classes.
+# MDR is defined here as resistance to three or more antimicrobial classes.
+# DR is defined as resistance to at least one antimicrobial class.
+AMR <- AMR %>%
+  mutate(
+    beta_lactam      = if_any(c(AMP, PIP, TZP, AMC, SAM), ~ . == "R"),
+    cephalosporin    = if_any(c(CTX, CRO, CAZ, FEP, CXM, CFP), ~ . == "R"),
+    carbapenem       = if_any(c(IPM, MEM, ETP), ~ . == "R"),
+    aminoglycoside   = if_any(c(AMK, GEN, NET), ~ . == "R"),
+    fluoroquinolone  = if_any(c(CIP, NOR, PEF), ~ . == "R"),
+    tetracycline     = TCY == "R",
+    sulfonamide      = SXT == "R",
+    amphenicol       = CHL == "R",
+    macrolide        = AZM == "R",
+    nitrofuran       = NIT == "R"
+  ) %>%
+  mutate(
+    n_classes_resistant = rowSums(across(
+      c(beta_lactam, cephalosporin, carbapenem, aminoglycoside,
+        fluoroquinolone, tetracycline, sulfonamide, amphenicol,
+        macrolide, nitrofuran),
+      ~ . == TRUE
+    ), na.rm = TRUE),
+    DR  = n_classes_resistant >= 1,
+    MDR = n_classes_resistant >= 3
+  )
+```
+
+# Overall DR and MDR estimates
+
+```{r overall-dr-mdr}
+# Overall proportion of DR and MDR isolates with Wilson confidence intervals.
+overall_dr_mdr <- AMR %>%
+  summarise(
+    total = n(),
+    DR_n = sum(DR, na.rm = TRUE),
+    MDR_n = sum(MDR, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c(DR_n, MDR_n), names_to = "indicator", values_to = "n") %>%
+  mutate(
+    indicator = recode(indicator, DR_n = "DR", MDR_n = "MDR"),
+    percent = n / total * 100
+  ) %>%
+  rowwise() %>%
+  mutate(
+    ci = list(binom.confint(n, total, method = "wilson")),
+    ci_low = ci$lower * 100,
+    ci_high = ci$upper * 100
+  ) %>%
+  ungroup() %>%
+  select(indicator, n, total, percent, ci_low, ci_high)
+
+overall_dr_mdr
+```
+
+# Overall resistance by antibiotic
+
+```{r overall-resistance}
+# Calculate resistance proportion for each antibiotic.
+resistance_rate <- AMR %>%
+  summarise(across(all_of(ast_cols), ~ {
+    total <- sum(!is.na(.))
+    resistant <- sum(. == "R", na.rm = TRUE)
+    tibble(resistant = resistant, tested = total)
+  })) %>%
+  pivot_longer(everything(), names_to = "Antibiotic", values_to = "data") %>%
+  unnest_wider(data) %>%
+  mutate(
+    percent = resistant / tested * 100,
+    resistance = paste0(resistant, "/", tested, " (", round(percent, 1), "%)")
+  ) %>%
+  arrange(desc(percent))
+
+resistance_rate
+```
+
+```{r overall-resistance-plot, fig.width=7, fig.height=7}
+# Bar plot of resistance percentage by antibiotic, including DR and MDR at the end.
+plot_data_overall <- resistance_rate %>%
+  select(Antibiotic, percent) %>%
+  arrange(percent) %>%
+  bind_rows(
+    overall_dr_mdr %>%
+      transmute(Antibiotic = indicator, percent)
+  ) %>%
+  mutate(Antibiotic = factor(Antibiotic, levels = Antibiotic))
+
+ggplot(plot_data_overall, aes(x = Antibiotic, y = percent)) +
+  geom_col(width = 0.7) +
+  coord_flip() +
+  geom_text(aes(label = sprintf("%.1f", percent)), hjust = -0.15, size = 3) +
+  labs(x = NULL, y = "Resistance (%)") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 9),
+    axis.title.x = element_text(face = "bold"),
+    legend.position = "none"
+  )
+```
+
+# Prepare long-format AMR data
+
+```{r long-format}
+# Convert wide AST dataset to long format for antibiotic-specific analyses.
+AMR_long <- AMR %>%
+  pivot_longer(
+    cols = all_of(ast_cols),
+    names_to = "Antibiotic",
+    values_to = "Result"
+  ) %>%
+  mutate(
+    Class = case_when(
+      Antibiotic %in% c("AMP", "PIP", "TZP", "AMC", "SAM") ~ "Beta-lactam",
+      Antibiotic %in% c("CTX", "CRO", "CAZ", "FEP", "CXM", "CFP") ~ "Cephalosporin",
+      Antibiotic %in% c("IPM", "MEM", "ETP") ~ "Carbapenem",
+      Antibiotic %in% c("AMK", "GEN", "NET") ~ "Aminoglycoside",
+      Antibiotic %in% c("CIP", "NOR", "PEF") ~ "Fluoroquinolone",
+      Antibiotic == "TCY" ~ "Tetracycline",
+      Antibiotic == "SXT" ~ "Sulfonamide",
+      Antibiotic == "CHL" ~ "Amphenicol",
+      Antibiotic == "AZM" ~ "Macrolide",
+      Antibiotic == "NIT" ~ "Nitrofuran",
+      TRUE ~ "Other"
+    )
+  )
+```
+
+# Temporal trend in resistance by antibiotic
+
+```{r antibiotic-year-summary}
+# Estimate yearly resistance by antibiotic.
+trend_data <- AMR_long %>%
+  group_by(year, Antibiotic, Class) %>%
+  summarise(
+    tested = sum(!is.na(Result)),
+    resistant = sum(Result == "R", na.rm = TRUE),
+    resistance_rate = resistant / tested * 100,
+    .groups = "drop"
+  )
+```
+
+```{r antibiotic-year-heatmap, fig.width=8, fig.height=7}
+# Heatmap of yearly resistance percentage by antibiotic.
+trend_data %>%
+  filter(!is.na(year), !is.na(Class), Class != "Other") %>%
+  group_by(Antibiotic) %>%
+  mutate(mean_resistance = mean(resistance_rate, na.rm = TRUE)) %>%
+  ungroup() %>%
+  arrange(mean_resistance) %>%
+  mutate(
+    Antibiotic = factor(Antibiotic, levels = unique(Antibiotic)),
+    resistance_plot = ifelse(tested < 1, NA, resistance_rate)
+  ) %>%
+  ggplot(aes(x = year, y = Antibiotic, fill = resistance_plot)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  scale_fill_gradientn(
+    colours = c("#fff5f0", "#fcbba1", "#fb6a4a", "#cb181d", "#67000d"),
+    na.value = "grey92",
+    limits = c(0, 100),
+    breaks = c(0, 25, 50, 75, 100),
+    name = "Resistance (%)"
+  ) +
+  scale_x_continuous(breaks = 2018:2024) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 11),
+    legend.title = element_text(face = "bold"),
+    panel.spacing = unit(0.3, "lines")
+  )
+```
+
+# Temporal trend in DR and MDR
+
+```{r dr-mdr-year-summary}
+# Annual DR and MDR proportion.
+dr_mdr_trend <- AMR %>%
+  filter(!is.na(year), !is.na(DR), !is.na(MDR)) %>%
+  group_by(year) %>%
+  summarise(
+    total = n(),
+    DR_n = sum(DR, na.rm = TRUE),
+    MDR_n = sum(MDR, na.rm = TRUE),
+    DR_pct = DR_n / total * 100,
+    MDR_pct = MDR_n / total * 100,
+    .groups = "drop"
+  )
+
+dr_mdr_trend
+```
+
+```{r dr-mdr-logistic-trend}
+# Logistic regression for temporal trend in DR and MDR.
+# The odds ratio represents the annual change in odds.
+glm_DR <- glm(DR ~ year, data = AMR, family = binomial)
+glm_MDR <- glm(MDR ~ year, data = AMR, family = binomial)
+
+trend_models <- bind_rows(
+  tidy(glm_DR, conf.int = TRUE, exponentiate = TRUE) %>% mutate(outcome = "DR"),
+  tidy(glm_MDR, conf.int = TRUE, exponentiate = TRUE) %>% mutate(outcome = "MDR")
+) %>%
+  filter(term == "year") %>%
+  select(outcome, estimate, conf.low, conf.high, p.value)
+
+trend_models
+```
+
+# Serovar-specific AMR patterns
+
+```{r serovar-amr-summary}
+# Summarise DR and MDR by serovar.
+serovar_amr <- AMR %>%
+  filter(!is.na(serotype), serotype != "Unavailable") %>%
+  group_by(serotype) %>%
+  summarise(
+    total = n(),
+    DR_n = sum(DR, na.rm = TRUE),
+    MDR_n = sum(MDR, na.rm = TRUE),
+    DR_pct = DR_n / total * 100,
+    MDR_pct = MDR_n / total * 100,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total))
+
+serovar_amr
+```
+
+```{r selected-serovars}
+# Define selected serovars for detailed analysis.
+# These include dominant serovars and additional serovars of public health interest.
+main_serovars <- c(
+  "Salmonella Enteritidis",
+  "Salmonella Weltevreden",
+  "Salmonella stanley",
+  "Salmonella Paratyphi B",
+  "Salmonella Typhimurium",
+  "Salmonella Newport",
+  "Salmonella Agona",
+  "Salmonella Bareilly",
+  "Salmonella ser. Hindmarsh",
+  "Salmonella Corvalis"
+)
+
+extra_serovars <- c(
+  "Salmonella Albany",
+  "Salmonella Brancaster",
+  "Salmonella Gallinarum",
+  "4,[5],12:i:-"
+)
+
+all_selected <- c(main_serovars, extra_serovars)
+```
+
+```{r serovar-mdr-trend}
+# Assess annual trend in MDR for selected serovars using logistic regression.
+serovar_trend <- AMR %>%
+  filter(serotype %in% all_selected, !is.na(MDR), !is.na(year)) %>%
+  group_by(serotype) %>%
+  group_modify(~ {
+    model <- glm(MDR ~ year, data = .x, family = binomial)
+    coef_df <- tidy(model) %>% filter(term == "year")
+    ci <- confint.default(model)["year", ]
+    tibble(
+      OR = exp(coef_df$estimate),
+      OR_low = exp(ci[1]),
+      OR_high = exp(ci[2]),
+      p_value = coef_df$p.value
+    )
+  }) %>%
+  ungroup() %>%
+  mutate(
+    trend = case_when(
+      p_value < 0.05 & OR > 1 ~ "Increasing",
+      p_value < 0.05 & OR < 1 ~ "Decreasing",
+      TRUE ~ "Stable"
+    )
+  ) %>%
+  arrange(p_value)
+
+serovar_trend
+```
+
+```{r serovar-model-diagnostics}
+# Simple model stability checks for serovar-specific MDR trend models.
+diag_results <- AMR %>%
+  filter(serotype %in% all_selected) %>%
+  group_split(serotype) %>%
+  map_df(function(df) {
+    sero_name <- unique(df$serotype)
+    df_clean <- df %>% filter(!is.na(MDR), !is.na(year))
+
+    yearly_counts <- df_clean %>%
+      group_by(year) %>%
+      summarise(
+        total_year = n(),
+        MDR_cases = sum(MDR),
+        .groups = "drop"
+      )
+
+    m0 <- glm(MDR ~ 1, data = df_clean, family = binomial)
+    m1 <- glm(MDR ~ year, data = df_clean, family = binomial)
+    coef_year <- tidy(m1) %>% filter(term == "year")
+    lrt <- anova(m0, m1, test = "Chisq")
+
+    tibble(
+      serotype = sero_name,
+      n = nrow(df_clean),
+      OR = exp(coef_year$estimate),
+      p_value = coef_year$p.value,
+      LRT_p = lrt$`Pr(>Chi)`[2],
+      dispersion = deviance(m1) / df.residual(m1),
+      std_error = coef_year$std.error,
+      min_year_n = min(yearly_counts$total_year, na.rm = TRUE),
+      zero_mdr_years = sum(yearly_counts$MDR_cases == 0, na.rm = TRUE),
+      all_mdr_years = sum(yearly_counts$MDR_cases == yearly_counts$total_year, na.rm = TRUE)
+    )
+  }) %>%
+  mutate(
+    trend = case_when(
+      p_value < 0.05 & OR > 1 ~ "Increasing",
+      p_value < 0.05 & OR < 1 ~ "Decreasing",
+      TRUE ~ "Stable"
+    ),
+    stability_flag = case_when(
+      std_error > 0.30 ~ "Caution",
+      OR > 5 | OR < 0.20 ~ "Caution",
+      min_year_n < 10 ~ "Caution",
+      zero_mdr_years > 2 ~ "Caution",
+      all_mdr_years > 0 ~ "Caution",
+      TRUE ~ "OK"
+    ),
+    fit_flag = case_when(
+      dispersion > 2 ~ "Poor fit",
+      dispersion > 1.5 ~ "Check fit",
+      TRUE ~ "Acceptable"
+    )
+  ) %>%
+  arrange(p_value)
+
+diag_results
+```
+
+# Geographical variation by state and region
+
+```{r define-region}
+# Define Malaysian regions for subnational AMR analysis.
+AMR <- AMR %>%
+  mutate(region = case_when(
+    state %in% c("Selangor", "Wilayah Persekutuan") ~ "Central",
+    state %in% c("Pulau Pinang", "Kedah", "Perlis", "Perak") ~ "Northern",
+    state %in% c("Kelantan", "Terengganu", "Pahang") ~ "East Coast",
+    state %in% c("Johor", "Melaka", "Negeri Sembilan") ~ "Southern",
+    state == "Sabah" ~ "Sabah",
+    state == "Sarawak" ~ "Sarawak",
+    TRUE ~ NA_character_
+  ))
+```
+
+```{r state-region-summary}
+# Summarise DR and MDR by state and region.
+state_summary <- AMR %>%
+  filter(!is.na(state)) %>%
+  group_by(region, state) %>%
+  summarise(
+    total = n(),
+    DR_n = sum(DR, na.rm = TRUE),
+    MDR_n = sum(MDR, na.rm = TRUE),
+    DR_pct = DR_n / total * 100,
+    MDR_pct = MDR_n / total * 100,
+    .groups = "drop"
+  ) %>%
+  arrange(region, desc(MDR_pct))
+
+state_summary
+```
+
+```{r state-mdr-trend}
+# Assess annual MDR trend by state.
+state_trend <- AMR %>%
+  filter(!is.na(MDR), !is.na(year), !is.na(state)) %>%
+  group_by(region, state) %>%
+  group_modify(~ {
+    model <- glm(MDR ~ year, data = .x, family = binomial)
+    coef_df <- tidy(model) %>% filter(term == "year")
+    ci <- confint.default(model)["year", ]
+    tibble(
+      OR = exp(coef_df$estimate),
+      OR_low = exp(ci[1]),
+      OR_high = exp(ci[2]),
+      p_value = coef_df$p.value
+    )
+  }) %>%
+  ungroup() %>%
+  mutate(
+    trend = case_when(
+      p_value < 0.05 & OR > 1 ~ "Increasing",
+      p_value < 0.05 & OR < 1 ~ "Decreasing",
+      TRUE ~ "Stable"
+    )
+  )
+
+state_trend
+```
+
+# MDR resistance combinations
+
+```{r mdr-patterns}
+# Identify antibiotic combinations among MDR isolates.
+# The pattern lists antibiotics interpreted as resistant for each MDR isolate.
+AMR_MDR <- AMR %>%
+  filter(MDR == TRUE) %>%
+  mutate(across(all_of(ast_cols), as.character)) %>%
+  mutate(
+    MDR_pattern = apply(
+      select(., all_of(ast_cols)),
+      1,
+      function(x) paste(names(x)[!is.na(x) & x == "R"], collapse = "-")
+    )
+  )
+
+# Most common MDR patterns overall
+mdr_patterns_overall <- AMR_MDR %>%
+  filter(MDR_pattern != "") %>%
+  count(MDR_pattern, sort = TRUE) %>%
+  mutate(percent = n / sum(n) * 100) %>%
+  slice_head(n = 15)
+
+mdr_patterns_overall
+```
+
+```{r mdr-patterns-region}
+# Most common MDR patterns by region.
+region_patterns <- AMR_MDR %>%
+  filter(!is.na(region), MDR_pattern != "") %>%
+  group_by(region, MDR_pattern) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(region) %>%
+  mutate(percent = n / sum(n) * 100) %>%
+  slice_max(n, n = 5) %>%
+  ungroup()
+
+region_patterns
+```
+
+# AMR by specimen type
+
+```{r specimen-summary}
+# Summarise DR and MDR by specimen type.
+# This uses the variable 'Specimen'. If your dataset uses another name,
+# update the variable accordingly.
+specimen_summary <- AMR %>%
+  filter(!is.na(Specimen)) %>%
+  group_by(Specimen) %>%
+  summarise(
+    total = n(),
+    DR_n = sum(DR, na.rm = TRUE),
+    MDR_n = sum(MDR, na.rm = TRUE),
+    DR_pct = DR_n / total * 100,
+    MDR_pct = MDR_n / total * 100,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total))
+
+specimen_summary
+```
+
+```{r specimen-dr-mdr-plot, fig.width=7, fig.height=5}
+# Stacked bar plot of non-DR, DR-only and MDR by specimen type.
+plot_data_specimen <- specimen_summary %>%
+  mutate(
+    non_DR = total - DR_n,
+    DR_only = DR_n - MDR_n,
+    MDR = MDR_n
+  ) %>%
+  select(Specimen, non_DR, DR_only, MDR) %>%
+  pivot_longer(
+    cols = c(non_DR, DR_only, MDR),
+    names_to = "Category",
+    values_to = "Count"
+  ) %>%
+  group_by(Specimen) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>%
+  ungroup() %>%
+  mutate(
+    Specimen = factor(Specimen, levels = specimen_summary %>% arrange(desc(total)) %>% pull(Specimen)),
+    Category = recode(Category, non_DR = "Non-DR", DR_only = "DR", MDR = "MDR")
+  )
+
+ggplot(plot_data_specimen, aes(x = Specimen, y = Percent, fill = Category)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  geom_text(
+    data = specimen_summary,
+    aes(x = Specimen, y = 105, label = paste0("n=", total)),
+    inherit.aes = FALSE,
+    size = 4
+  ) +
+  labs(x = NULL, y = "Percentage (%)") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_blank(),
+    panel.grid = element_blank()
+  )
+```
+
+```{r specimen-antibiotic-heatmap, fig.width=8, fig.height=8}
+# Heatmap of antibiotic-specific resistance by year for blood and stool isolates.
+# This uses the variable `Specimen type`. If your dataset uses another name,
+# update the variable accordingly.
+trend_data_specimen <- AMR_long %>%
+  filter(`Specimen type` %in% c("blood", "stool")) %>%
+  group_by(`Specimen type`, year, Antibiotic) %>%
+  summarise(
+    tested = sum(!is.na(Result)),
+    resistant = sum(Result == "R", na.rm = TRUE),
+    resistance_rate = resistant / tested * 100,
+    .groups = "drop"
+  )
+
+trend_data_specimen %>%
+  filter(!is.na(year)) %>%
+  group_by(`Specimen type`, Antibiotic) %>%
+  mutate(mean_resistance = mean(resistance_rate, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(
+    Antibiotic = reorder_within(Antibiotic, mean_resistance, `Specimen type`),
+    `Specimen type` = factor(`Specimen type`, levels = c("blood", "stool")),
+    resistance_plot = ifelse(tested < 1, NA, resistance_rate)
+  ) %>%
+  ggplot(aes(x = year, y = Antibiotic, fill = resistance_plot)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  scale_fill_gradientn(
+    colours = c("#fff5f0", "#fcbba1", "#fb6a4a", "#cb181d", "#67000d"),
+    na.value = "grey92",
+    limits = c(0, 100),
+    breaks = c(0, 25, 50, 75, 100),
+    name = "Resistance (%)"
+  ) +
+  scale_x_continuous(breaks = 2018:2024) +
+  facet_wrap(~ `Specimen type`, ncol = 1, scales = "free_y") +
+  scale_y_reordered() +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(size = 9),
+    axis.text.y = element_text(size = 9),
+    legend.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold"),
+    panel.spacing = unit(0.3, "lines")
+  )
+```
+
+```{r dr-mdr-by-specimen-time, fig.width=7, fig.height=5}
+# Annual DR and MDR trends overall and by selected specimen types.
+overall <- AMR %>%
+  filter(!is.na(year), !is.na(DR), !is.na(MDR)) %>%
+  group_by(year) %>%
+  summarise(
+    DR = mean(DR) * 100,
+    MDR = mean(MDR) * 100,
+    .groups = "drop"
+  ) %>%
+  mutate(Group = "Overall")
+
+by_specimen <- AMR %>%
+  filter(`Specimen type` %in% c("blood", "stool"), !is.na(year), !is.na(DR), !is.na(MDR)) %>%
+  group_by(`Specimen type`, year) %>%
+  summarise(
+    DR = mean(DR) * 100,
+    MDR = mean(MDR) * 100,
+    .groups = "drop"
+  ) %>%
+  rename(Group = `Specimen type`)
+
+plot_data <- bind_rows(overall, by_specimen) %>%
+  pivot_longer(cols = c(DR, MDR), names_to = "Type", values_to = "Percent") %>%
+  mutate(Group = factor(Group, levels = c("Overall", "blood", "stool")))
+
+ggplot(plot_data, aes(x = year, y = Percent, linetype = Group, shape = Group, color = Type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = 2018:2024) +
+  labs(x = NULL, y = "Percentage (%)", color = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    legend.position = "right"
+  )
+```
+
+# AMR by age group
+
+```{r age-summary}
+# Summarise DR and MDR by age group.
+AMR_age <- AMR %>%
+  filter(!is.na(age_categ), age_categ != "Unknown")
+
+age_summary <- AMR_age %>%
+  group_by(age_categ) %>%
+  summarise(
+    total = n(),
+    DR_n = sum(DR, na.rm = TRUE),
+    MDR_n = sum(MDR, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    DR_pct = DR_n / total * 100,
+    MDR_pct = MDR_n / total * 100,
+    DR_ci_low = binom.confint(DR_n, total, method = "wilson")$lower * 100,
+    DR_ci_high = binom.confint(DR_n, total, method = "wilson")$upper * 100,
+    MDR_ci_low = binom.confint(MDR_n, total, method = "wilson")$lower * 100,
+    MDR_ci_high = binom.confint(MDR_n, total, method = "wilson")$upper * 100
+  ) %>%
+  ungroup()
+
+age_summary
+```
+
+```{r age-group-tests}
+# Chi-square tests to compare DR and MDR distribution across age groups.
+table_DR <- table(AMR_age$age_categ, AMR_age$DR)
+table_MDR <- table(AMR_age$age_categ, AMR_age$MDR)
+
+chisq.test(table_DR)
+chisq.test(table_MDR)
+```
+
+```{r age-logistic-models}
+# Logistic regression for association between age group and DR/MDR.
+glm_DR_age <- glm(DR ~ age_categ, data = AMR_age, family = binomial)
+glm_MDR_age <- glm(MDR ~ age_categ, data = AMR_age, family = binomial)
+
+age_model_results <- bind_rows(
+  tidy(glm_DR_age, conf.int = TRUE, exponentiate = TRUE) %>% mutate(outcome = "DR"),
+  tidy(glm_MDR_age, conf.int = TRUE, exponentiate = TRUE) %>% mutate(outcome = "MDR")
+)
+
+age_model_results
+```
+
+```{r age-antibiotic-heatmap, fig.width=8, fig.height=8}
+# Antibiotic-specific resistance trends for selected age groups.
+# Update selected age groups according to the thesis analysis plan.
+AMR_ce <- AMR_long %>%
+  filter(age_categ %in% c("Children", "Elderly"))
+
+trend_age_abx <- AMR_ce %>%
+  group_by(age_categ, year, Antibiotic) %>%
+  summarise(
+    tested = sum(!is.na(Result)),
+    resistant = sum(Result == "R", na.rm = TRUE),
+    resistance_rate = resistant / tested * 100,
+    .groups = "drop"
+  )
+
+trend_age_abx %>%
+  filter(!is.na(year)) %>%
+  group_by(age_categ, Antibiotic) %>%
+  mutate(mean_resistance = mean(resistance_rate, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Antibiotic = reorder_within(Antibiotic, mean_resistance, age_categ)) %>%
+  ggplot(aes(x = year, y = Antibiotic, fill = resistance_rate)) +
+  geom_tile(color = "white") +
+  scale_fill_gradientn(
+    colours = c("#fff5f0", "#fcbba1", "#fb6a4a", "#cb181d", "#67000d"),
+    limits = c(0, 100),
+    name = "Resistance (%)"
+  ) +
+  facet_wrap(~ age_categ, ncol = 1, scales = "free_y") +
+  scale_y_reordered() +
+  scale_x_continuous(breaks = 2018:2024) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank())
+```
+
