@@ -1,6 +1,5 @@
 # Non-typhoidal Salmonella (NTS) Analysis in Malaysia (2018-2024)
-for DrPH (Epidemiology), Universiti Sains Malaysia
-Author: Dr. Hazlienor Mohd Hatta
+for DrPH (Epidemiology), Universiti Sains Malaysia by Dr. Hazlienor Mohd Hatta
 
 ## Overview
 This repository contains R scripts used for data cleaning, statistical analysis, and modelling for a multi-stage study on human non-typhoidal *Salmonella* (NTS) in Malaysia. The study integrates bibliometric analysis, outbreak epidemiology, incidence estimation, antimicrobial resistance (AMR) analysis, and time-series modelling.
@@ -71,6 +70,6 @@ The scripts were developed in **R** using the following main packages:
 - bibliometrix  
 - keras / tensorflow (if applicable)
 
-Install required packages:
+
 ```r
 install.packages(c("tidyverse", "MASS", "forecast", "tseries", "ggplot2", "bibliometrix"))
