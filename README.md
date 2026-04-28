@@ -9,7 +9,8 @@ This repository contains R scripts used for data cleaning, statistical analysis,
 ## Repository Structure
 - `/bibliometric_analysis` – Bibliometric mapping and narrative review scripts  
 - `/outbreak_analysis` – Outbreak epidemiology and contributing factors  
-- `/incidence_analysis` – Incidence estimation analysis  
+- `/incidence_analysis` – Incidence estimation analysis
+- `/MF_analysis` – Underestimation analysis  
 - `/serovar_analysis` – Serovar analysis
 - `/AMR_analysis` – AMR analysis
 - `/time_series_analysis` – Time-series analysis
